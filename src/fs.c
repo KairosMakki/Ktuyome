@@ -173,7 +173,7 @@ static const char *readme =
 "  Text Editor  Ctrl+S save, Ctrl+O open, Ctrl+N new, F5 SVG preview\n"
 "  Calculator   mouse or keyboard\n"
 "  Files        browse, create, delete, copy/cut/paste, preview SVG and PNG\n"
-"  Settings     display, input, time, storage\n\n"
+"  Settings     display, input, sound, time, storage\n\n"
 "Screenshots\n"
 "  F12 (anywhere)  saves the screen as a PNG in /images\n"
 "  Open it in Files: Enter on a .png shows it full size\n\n"

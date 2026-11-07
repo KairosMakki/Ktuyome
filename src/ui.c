@@ -2,7 +2,7 @@
 /* Ktuyome shell: boot splash, PS5-style home screen, app host, dialogs, widgets, main loop. */
 
 /* ============================== settings ============================== */
-Settings cfg = { 0x3153544B, 0, 0, 100, 2, 1, 0 };
+Settings cfg = { 0x3153544B, 0, 0, 100, 2, 1, 0, 1, 70 };
 const u32 accents[5] = { 0xFF3D8BFF, 0xFF8B5CFF, 0xFF19C3A6, 0xFFFF5C8A, 0xFFFFB020 };
 const char *accent_names[5] = { "Blue", "Violet", "Teal", "Pink", "Amber" };
 const char *wall_names[3] = { "Midnight", "Aurora", "Ember" };
@@ -11,12 +11,14 @@ static int baked_wall = -1;
 void settings_apply(void) {
     cfg.accent = iclamp(cfg.accent, 0, 4); cfg.wall = iclamp(cfg.wall, 0, 2);
     cfg.bright = iclamp(cfg.bright, 30, 100); cfg.mspeed = iclamp(cfg.mspeed, 1, 4);
-    g_brightness = cfg.bright; mouse_speed = cfg.mspeed;
+    cfg.sound = cfg.sound ? 1 : 0; cfg.volume = iclamp(cfg.volume, 0, 100);
+    g_brightness = cfg.bright; mouse_speed = cfg.mspeed; snd_volume();
     if (baked_wall != cfg.wall) { gfx_bake_wallpaper(cfg.wall); baked_wall = cfg.wall; }
 }
 void settings_load(void) {
     char buf[64]; int n = fs_read_text("/system/settings.cfg", buf, sizeof buf);
     if (n == (int)sizeof(Settings)) { Settings s; memcpy(&s, buf, sizeof s); if (s.magic == cfg.magic) cfg = s; }
+    else if (n == 28) { Settings s = cfg; memcpy(&s, buf, 28); if (s.magic == cfg.magic) cfg = s; }   /* settings saved before sound existed */
 }
 void settings_save(void) {
     fs_write_text("/system/settings.cfg", (const char *)&cfg, sizeof cfg);
@@ -92,7 +94,7 @@ static const Tile tiles[2][9] = {
       { "Zip", "Create and extract zip archives.", IC_ZIP, 0xFF9CE29B, 0xFF388E3C, 0, APP_ZIP },
       { "Image Viewer", "View PNG images with pan and zoom.", IC_VIEWER, 0xFF64B5F6, 0xFF1565C0, 0, APP_VIEWER },
       { "Paint", "Draw and export PNG images.", IC_PAINT, 0xFFFF8A80, 0xFFD32F2F, 0, APP_PAINT } },
-    { { "Settings", "Display, input, date and time, storage.", IC_SETTINGS, 0xFF90A4AE, 0xFF546E7A, 0, APP_SETTINGS },
+    { { "Settings", "Display, input, sound, date and time, storage.", IC_SETTINGS, 0xFF90A4AE, 0xFF546E7A, 0, APP_SETTINGS },
       { "Browser", "Text-mode web browser, HTTP and HTTPS.", IC_BROWSER, 0xFF64B5F6, 0xFF1565C0, 0, APP_BROWSER },
       { "Discord", "Chat client with WebSocket Gateway.", IC_DISCORD, 0xFF7986CB, 0xFF5865F2, 0, APP_DISCORD },
       { "About", "System information and hardware.", IC_ABOUT, 0xFF81D4FA, 0xFF0288D1, 3, 0 },
@@ -119,7 +121,7 @@ static int dirty = 1, clk_h, clk_m, clk_s, clk_day, clk_mon, clk_year, drag_id;
 static char toast_msg[64]; static u32 toast_until;
 
 void ui_wake(void) { dirty = 1; }
-void ui_flash(const char *m) { kstrcpy(toast_msg, m, sizeof toast_msg); toast_until = ticks() + 1800; dirty = 1; }
+void ui_flash(const char *m) { kstrcpy(toast_msg, m, sizeof toast_msg); toast_until = ticks() + 1800; dirty = 1; snd_play(snd_for_message(m)); }
 
 /* ============================== widgets ============================== */
 static int inside(int px, int py, int x, int y, int w, int h) { return px >= x && px < x + w && py >= y && py < y + h; }
@@ -165,7 +167,7 @@ void ui_dialog(const char *title, const char *msg, const char *b0, const char *b
     dlg.active = 1; dlg.action = action; dlg.sel = action <= DLG_SHUTDOWN ? 1 : 0;
     kstrcpy(dlg.title, title, sizeof dlg.title); kstrcpy(dlg.msg, msg, sizeof dlg.msg);
     kstrcpy(dlg.b0, b0, sizeof dlg.b0); kstrcpy(dlg.b1, b1, sizeof dlg.b1);
-    dirty = 1;
+    dirty = 1; snd_play(SND_WARN);
 }
 static void power_screen(const char *msg) {
     gfx_target(g_bb, W, H); gfx_noclip(); gfx_fill(0, 0, W, H, 0xFF000000);
@@ -175,8 +177,8 @@ static void power_screen(const char *msg) {
 }
 static void dialog_confirm(void) {
     int a = dlg.action; dlg.active = 0; dirty = 1;
-    if (a == DLG_RESTART) { fs_save(); reboot(); }
-    else if (a == DLG_SHUTDOWN) { fs_save(); power_screen("Ktuyome has shut down"); power_off(); for (;;) __asm__ volatile("cli; hlt"); }
+    if (a == DLG_RESTART) { fs_save(); snd_play(SND_SHUTDOWN); snd_wait(1300); reboot(); }
+    else if (a == DLG_SHUTDOWN) { fs_save(); snd_play(SND_SHUTDOWN); power_screen("Ktuyome has shut down"); snd_wait(1300); power_off(); for (;;) __asm__ volatile("cli; hlt"); }
     else if (a == DLG_FORMAT) { fs_format(); ui_reload_icons(); settings_apply(); ui_flash("Storage reset to defaults"); }
     else apps_dialog_done(a, g_dlg_arg);
 }
@@ -202,7 +204,7 @@ static void draw_dialog(void) {
 /* ============================== app host ============================== */
 void ui_open_app(int app) {
     if (cur_app >= 0 && !closing) return;
-    cur_app = app; closing = 0; g_state = ST_APP; app_opens[app]++;
+    cur_app = app; closing = 0; g_state = ST_APP; app_opens[app]++; snd_play(SND_OPEN);
     for (int i = 0; i < 4; i++) open_from[i] = tile_rc[sel[tab]][i];
     if (open_from[2] == 0) { open_from[0] = W / 2 - 80; open_from[1] = H / 2 - 80; open_from[2] = open_from[3] = 160; }
     apps[app].open();
@@ -212,11 +214,11 @@ void ui_open_app(int app) {
 }
 void ui_close_app(void) {
     if (cur_app < 0 || closing) return;
-    apps[cur_app].close(); closing = 1; open_anim.tgt = 0; dirty = 1;
+    apps[cur_app].close(); closing = 1; open_anim.tgt = 0; dirty = 1; snd_play(SND_BACK);
 }
 void ui_switch_app(int app) {
     if (cur_app < 0 || closing) { ui_open_app(app); return; }
-    apps[cur_app].close(); cur_app = app; app_opens[app]++; apps[app].open(); dirty = 1;
+    apps[cur_app].close(); cur_app = app; app_opens[app]++; apps[app].open(); dirty = 1; snd_play(SND_OPEN);
 }
 void ui_logo(int x, int y, int size) { gfx_blit_scaled(logo_bmp, 128, 128, x, y, size, size, 255); }
 static void activate_tile(void) {
@@ -225,7 +227,7 @@ static void activate_tile(void) {
         case 0: ui_open_app(t->arg); break;
         case 1: ui_dialog("Restart", "Restart Ktuyome now?", "Cancel", "Restart", DLG_RESTART); break;
         case 2: ui_dialog("Shut Down", "Turn off the system?", "Cancel", "Shut Down", DLG_SHUTDOWN); break;
-        case 3: settings_goto(4); ui_open_app(APP_SETTINGS); break;
+        case 3: settings_goto(5); ui_open_app(APP_SETTINGS); break;
     }
 }
 
@@ -425,7 +427,7 @@ static void take_screenshot(void) {                              /* g_bb holds t
     kfree(buf);
     fs_save(); files_invalidate();
     char msg[64]; kstrcpy(msg, "Saved ", sizeof msg); kstrcat(msg, path, sizeof msg);
-    ui_flash(msg);
+    snd_play(SND_SHOT); ui_flash(msg);
 }
 
 static void render(void) {
@@ -497,11 +499,11 @@ static void splash_frame(int alpha, int bar) {
 /* ============================== input ============================== */
 static void home_key(const Event *e) {
     switch (e->key) {
-        case K_LEFT:  if (sel[tab] > 0) { sel[tab]--; home_scroll_to_sel = 1; } break;
-        case K_RIGHT: if (sel[tab] < ntiles[tab] - 1) { sel[tab]++; home_scroll_to_sel = 1; } break;
-        case K_UP:    tab = 0; home_scroll_to_sel = 1; break;
-        case K_DOWN:  tab = 1; home_scroll_to_sel = 1; break;
-        case K_TAB:   tab ^= 1; home_scroll_to_sel = 1; break;
+        case K_LEFT:  if (sel[tab] > 0) { sel[tab]--; home_scroll_to_sel = 1; snd_play(SND_NAV); } else snd_play(SND_BUMP); break;
+        case K_RIGHT: if (sel[tab] < ntiles[tab] - 1) { sel[tab]++; home_scroll_to_sel = 1; snd_play(SND_NAV); } else snd_play(SND_BUMP); break;
+        case K_UP:    if (tab != 0) snd_play(SND_TAB); tab = 0; home_scroll_to_sel = 1; break;
+        case K_DOWN:  if (tab != 1) snd_play(SND_TAB); tab = 1; home_scroll_to_sel = 1; break;
+        case K_TAB:   tab ^= 1; home_scroll_to_sel = 1; snd_play(SND_TAB); break;
         case K_ENTER: activate_tile(); break;
         case K_F10:   ui_dialog("Shut Down", "Turn off the system?", "Cancel", "Shut Down", DLG_SHUTDOWN); break;
         default: return;
@@ -516,7 +518,7 @@ static void handle_event(const Event *e) {
     }
     if (dlg.active) {
         if (e->type == EV_KEY) {
-            if (e->key == K_LEFT || e->key == K_RIGHT || e->key == K_TAB) dlg.sel ^= 1;
+            if (e->key == K_LEFT || e->key == K_RIGHT || e->key == K_TAB) { dlg.sel ^= 1; snd_play(SND_NAV); }
             else if (e->key == K_ENTER) { if (dlg.sel) dialog_confirm(); else dlg.active = 0; }
             else if (e->key == K_ESC) dlg.active = 0;
         } else if (e->type == EV_DOWN && e->btn == 1) { g_click = 1; g_click_x = e->x; g_click_y = e->y; g_click_mods = e->mods; }
@@ -536,14 +538,14 @@ static void handle_event(const Event *e) {
     if (g_state == ST_HOME && !closing && cur_app < 0) {
         if (e->type == EV_MOVE) {
             for (int i = 0; i < ntiles[tab]; i++) if (inside(e->x, e->y, tile_rc[i][0], tile_rc[i][1], tile_rc[i][2], tile_rc[i][3]) && sel[tab] != i) {
-                sel[tab] = i; sel_anim.tgt = i * 65536; }
+                sel[tab] = i; sel_anim.tgt = i * 65536; snd_play(SND_NAV); }
         } else if (e->type == EV_DOWN && e->btn == 1) {
             if (has_left_arrow && inside(e->x, e->y, arrow_left[0], arrow_left[1], arrow_left[2], arrow_left[3])) {
                 home_scroll = imax(0, home_scroll - 120); home_scroll_to_sel = 0; g_click = 0; { char _b[16]; kitoa(_b, home_scroll); fs_write_text("/system/home.txt", _b, (int)strlen(_b)); } ui_wake(); return; }
             if (has_right_arrow && inside(e->x, e->y, arrow_right[0], arrow_right[1], arrow_right[2], arrow_right[3])) {
                 home_scroll = imin(home_scroll_max, home_scroll + 120); home_scroll_to_sel = 0; g_click = 0; { char _b[16]; kitoa(_b, home_scroll); fs_write_text("/system/home.txt", _b, (int)strlen(_b)); } ui_wake(); return; }
             for (int i = 0; i < 2; i++) if (inside(e->x, e->y, tab_rc[i][0], tab_rc[i][1], tab_rc[i][2], tab_rc[i][3])) {
-                tab = i; tab_anim.tgt = i * 65536; sel_anim.tgt = sel[tab] * 65536; home_scroll_to_sel = 1; g_click = 0; return; }
+                if (tab != i) snd_play(SND_TAB); tab = i; tab_anim.tgt = i * 65536; sel_anim.tgt = sel[tab] * 65536; home_scroll_to_sel = 1; g_click = 0; return; }
             for (int i = 0; i < ntiles[tab]; i++) if (inside(e->x, e->y, tile_rc[i][0], tile_rc[i][1], tile_rc[i][2], tile_rc[i][3])) {
                 sel[tab] = i; sel_anim.tgt = i * 65536; home_scroll_to_sel = 1; g_click = 0; activate_tile(); return; }
         } else if (e->type == EV_KEY) home_key(e);
@@ -566,6 +568,7 @@ void panic_screen(const char *msg, u32 a, u32 b) {
     gfx_text(F_MD, 96, 306, line, WHITE_A(200));
     gfx_text(F_MD, 96, 340, "Please restart the computer.", WHITE_A(160));
     gfx_present();
+    snd_panic();
 }
 
 /* ============================== kernel entry ============================== */
@@ -578,6 +581,7 @@ void kmain(u32 magic, u32 mbi) {
     apps_init();
     fs_init();
     settings_load(); settings_apply();
+    snd_init(); snd_volume(); snd_play(SND_STARTUP);
     ui_reload_icons();
     { char _b[32]; if (fs_read_text("/system/home.txt", _b, sizeof _b) >= 0) { home_scroll = katoi(_b); home_scroll_to_sel = 0; } }
     { char _b[16]; if (fs_read_text("/system/hometab.txt", _b, sizeof _b) >= 0) { tab = katoi(_b); if (tab < 0 || tab > 1) tab = 0; } }
@@ -587,6 +591,7 @@ void kmain(u32 magic, u32 mbi) {
         if (t > 1900) break;
         int a = t < 500 ? (int)(t * 255 / 500) : (t > 1500 ? (int)((1900 - t) * 255 / 400) : 255);
         splash_frame(iclamp(a, 0, 255), (int)(t * 256 / 1900));
+        snd_tick();
         __asm__ volatile("hlt");
     }
     fade_anim.cur = 255 << 8; fade_anim.tgt = 0;
@@ -615,7 +620,7 @@ void kmain(u32 magic, u32 mbi) {
         int bl = (now / 530) & 1;
         if (bl != g_blink) { g_blink = bl; if (cur_app >= 0) dirty = 1; }
         if (toast_until && now > toast_until) { toast_until = 0; dirty = 1; }
-        apps_tick();
+        snd_tick(); apps_tick();
         if ((dirty || busy) && now - last_frame >= 12) {
             dirty = 0; render(); g_click = 0; g_wheel = 0; last_frame = ticks();
             if (busy) dirty = 1;

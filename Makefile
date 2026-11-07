@@ -4,7 +4,7 @@ CFLAGS  = -m32 -O3 -std=gnu11 -ffreestanding -fno-pie -fno-pic -fno-stack-protec
           -fomit-frame-pointer -DNDEBUG \
           -Wall -Wno-unused-function -Wno-misleading-indentation -Isrc
 LIBGCC  = $(shell $(CC) -m32 -print-libgcc-file-name)
-SRC     = boot.S lib.c arch.c gfx.c svg.c fs.c fat32.c ui.c apps.c apps2.c taskmgr.c net.c netapp.c fontdata.c \
+SRC     = boot.S lib.c arch.c gfx.c svg.c fs.c fat32.c audio.c ui.c apps.c apps2.c taskmgr.c net.c netapp.c fontdata.c \
           divfallback.c kmalloc.c clip.c png.c zip.c viewer.c paint.c miniz_kt.c miniz_malloc.c \
           vendor/kcompat.c \
           browser.c \
@@ -12,6 +12,12 @@ SRC     = boot.S lib.c arch.c gfx.c svg.c fs.c fat32.c ui.c apps.c apps2.c taskm
           vendor/bearssl/bearssl.c \
           vendor/quickjs/quickjs_kt.c
 OBJ     = $(addprefix build/,$(addsuffix .o,$(SRC)))
+
+# Sound: an Intel AC'97 card plus the PC speaker, both routed to the host audio backend.
+# AUDIODEV is the QEMU backend for your host: pa (Linux, default), alsa, pipewire, coreaudio (macOS), dsound (Windows).
+#   make run AUDIODEV=coreaudio        make run SND=        (no sound hardware at all)
+AUDIODEV ?= pa
+SND      ?= -audiodev $(AUDIODEV),id=snd0 -device AC97,audiodev=snd0 -machine pcspk-audiodev=snd0
 
 all: ktuyome.iso
 
@@ -32,7 +38,7 @@ run: ktuyome.iso
 	@[ -f disk.img ] || qemu-img create -f raw disk.img 64M
 	qemu-system-i386 -m 256 -cdrom ktuyome.iso -hda disk.img -boot d -vga std \
 	  -netdev user,id=net0 \
-	  -device e1000,netdev=net0
+	  -device e1000,netdev=net0 $(SND)
 # FAT32 playground: boots with a plain FAT32 volume attached as the second disk (-hdb).
 # Needs the mtools package for fat.img (mformat/mcopy). In Files, press FAT32 to browse it.
 fat.img:
@@ -45,11 +51,11 @@ runfat: ktuyome.iso fat.img
 	@[ -f disk.img ] || qemu-img create -f raw disk.img 64M
 	qemu-system-i386 -m 256 -cdrom ktuyome.iso -hda disk.img -hdb fat.img -boot d -vga std \
 	  -netdev user,id=net0 \
-	  -device e1000,netdev=net0
+	  -device e1000,netdev=net0 $(SND)
 runnet: ktuyome.iso
 	@[ -f disk.img ] || qemu-img create -f raw disk.img 64M
 	qemu-system-i386 -m 256 -cdrom ktuyome.iso -hda disk.img -boot d -vga std \
 	  -netdev user,id=net0,hostfwd=tcp::8080-:80 \
-	  -device e1000,netdev=net0
+	  -device e1000,netdev=net0 $(SND)
 clean:
 	rm -rf build ktuyome.iso

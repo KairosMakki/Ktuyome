@@ -390,7 +390,7 @@ static double c_apply(double a, int op, double b) {
     }
     return b;
 }
-static void c_press(int id) {
+static void c_press_(int id) {
     if (c_err && id != C_AC) return;
     if (id <= 9 || id == C_DOT) {
         if (c_fresh || !c_entry) { c_buf[0] = 0; c_fresh = 0; }
@@ -419,6 +419,7 @@ static void c_press(int id) {
     }
 done:;
 }
+static void c_press(int id) { int was = c_err; c_press_(id); if (c_err && !was) snd_play(SND_ERROR); }   /* error beep on divide by zero etc. */
 static void calc_open(void) {
     if (!c_ops_ok) { for (int i = 0; i < 4; i++) svg_render(c_op_svg[i], (int)strlen(c_op_svg[i]), c_ops[i], 40, 0xFFFFFFFF); c_ops_ok = 1; }
 }

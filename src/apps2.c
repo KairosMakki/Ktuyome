@@ -524,10 +524,14 @@ void files_draw(int x, int y, int w, int h) {
 }
 
 /* ============================== Settings ============================== */
-static int s_page, s_col, s_row, s_dirty, s_last;
-static const char *s_pages[5] = { "Display", "Input", "Date and Time", "Storage", "About" };
-static const int s_rows[5] = { 3, 1, 4, 2, 0 };
-void settings_goto(int page) { s_page = iclamp(page, 0, 4); s_col = 0; s_row = 0; }
+static int s_page, s_col, s_row, s_dirty, s_last, s_tsnd; static u32 s_vsnd;
+#define S_PAGES 6
+enum { P_DISPLAY, P_INPUT, P_SOUND, P_TIME, P_STORAGE, P_ABOUT };
+static const char *s_pages[S_PAGES] = { "Display", "Input", "Sound", "Date and Time", "Storage", "About" };
+static const int s_rows[S_PAGES] = { 3, 1, 3, 4, 2, 0 };
+static const char *s_tnames[SND_PANIC] = { "Startup", "Shutdown", "Navigation", "Tab switch", "Edge bump", "Open app", "Close app",
+                                           "Notification", "Success", "Error", "Warning", "Screenshot" };
+void settings_goto(int page) { s_page = iclamp(page, 0, S_PAGES - 1); s_col = 0; s_row = 0; }
 void set_open(void) {}
 void set_close(void) { if (s_dirty) { settings_save(); s_dirty = 0; } }
 void set_tick(void) { if (s_dirty && (int)ticks() - s_last > 900) { settings_save(); s_dirty = 0; } }
@@ -540,10 +544,13 @@ static void adjust(int dir) {
         case 1: cfg.wall = (cfg.wall + dir + 3) % 3; break;
         case 2: cfg.bright = iclamp(cfg.bright + dir * 5, 30, 100); break;
         case 10: cfg.mspeed = iclamp(cfg.mspeed + dir, 1, 4); break;
-        case 20: cfg.h24 = !cfg.h24; break;
-        case 21: cfg.secs = !cfg.secs; break;
-        case 22: rtc_read(&h, &m, &s, &d, &mo, &y); rtc_set_time((h + dir + 24) % 24, m); break;
-        case 23: rtc_read(&h, &m, &s, &d, &mo, &y); rtc_set_time(h, (m + dir + 60) % 60); break;
+        case 20: cfg.sound = !cfg.sound; changed(); if (cfg.sound) snd_play(SND_OK); return;
+        case 21: cfg.volume = iclamp(cfg.volume + dir * 5, 0, 100); changed(); snd_play(SND_NAV); return;
+        case 22: s_tsnd = (s_tsnd + dir + SND_PANIC) % SND_PANIC; ui_wake(); return;
+        case 30: cfg.h24 = !cfg.h24; break;
+        case 31: cfg.secs = !cfg.secs; break;
+        case 32: rtc_read(&h, &m, &s, &d, &mo, &y); rtc_set_time((h + dir + 24) % 24, m); break;
+        case 33: rtc_read(&h, &m, &s, &d, &mo, &y); rtc_set_time(h, (m + dir + 60) % 60); break;
         default: return;
     }
     changed();
@@ -551,18 +558,20 @@ static void adjust(int dir) {
 int set_key(const Event *e) {
     switch (e->key) {
         case K_UP: if (!s_col) { s_page = imax(0, s_page - 1); s_row = 0; } else s_row = imax(0, s_row - 1); return 1;
-        case K_DOWN: if (!s_col) { s_page = imin(4, s_page + 1); s_row = 0; } else s_row = imin(imax(0, s_rows[s_page] - 1), s_row + 1); return 1;
+        case K_DOWN: if (!s_col) { s_page = imin(S_PAGES - 1, s_page + 1); s_row = 0; } else s_row = imin(imax(0, s_rows[s_page] - 1), s_row + 1); return 1;
         case K_RIGHT: if (!s_col) { if (s_rows[s_page]) s_col = 1; } else adjust(1); return 1;
         case K_LEFT: if (s_col) adjust(-1); return 1;
         case K_ENTER:
             if (!s_col) { if (s_rows[s_page]) s_col = 1; }
-            else if (s_page == 2 && s_row < 2) adjust(1);
-            else if (s_page == 3) { if (s_row == 0) { fs_save(); ui_flash("Saved to disk"); } else ui_dialog("Reset storage", "Erase all files and restore defaults?", "Cancel", "Reset", DLG_FORMAT); }
+            else if (s_page == P_SOUND) { if (s_row == 0) adjust(1); else if (s_row == 2) snd_test(s_tsnd); }
+            else if (s_page == P_TIME && s_row < 2) adjust(1);
+            else if (s_page == P_STORAGE) { if (s_row == 0) { fs_save(); ui_flash("Saved to disk"); } else ui_dialog("Reset storage", "Erase all files and restore defaults?", "Cancel", "Reset", DLG_FORMAT); }
             return 1;
         case K_ESC: if (s_col) { s_col = 0; return 1; } return 0;
     }
     return 0;
 }
+static void adjust_test(int dir) { s_tsnd = (s_tsnd + dir + SND_PANIC) % SND_PANIC; snd_test(s_tsnd); ui_wake(); }
 static void label(int x, int y, const char *t) { gfx_text(F_MDB, x, y, t, 0xFFFFFFFF); }
 static void focus_ring(int row, int x, int y, int w, int h) {
     if (s_col && s_row == row) gfx_rrect(x - 8, y - 8, w + 16, h + 16, 16, WHITE_A(200), WHITE_A(200), 2);
@@ -573,7 +582,7 @@ static void info_row(int x, int y, int w, const char *k, const char *v) {
 }
 void set_draw(int x, int y, int w, int h) {
     int lw = 240;
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < S_PAGES; i++) {
         int ry = y + i * 56, on = i == s_page;
         if (on) gfx_rrect(x, ry, lw, 48, 14, col_alpha(ACC, s_col ? 70 : 140), col_alpha(ACC, s_col ? 70 : 140), 0);
         else if (ui_hover(x, ry, lw, 48)) gfx_rrect(x, ry, lw, 48, 14, WHITE_A(20), WHITE_A(20), 0);
@@ -583,7 +592,7 @@ void set_draw(int x, int y, int w, int h) {
     int cx = x + lw + 30, cw = w - lw - 30;
     ui_panel(cx - 10, y - 4, cw + 10, h + 8, WHITE_A(12));
     cx += 20; cw -= 40; int cy = y + 16;
-    if (s_page == 0) {
+    if (s_page == P_DISPLAY) {
         label(cx, cy, "Accent colour");
         for (int i = 0; i < 5; i++) {
             int sx = cx + 26 + i * 66, sy = cy + 70;
@@ -612,7 +621,7 @@ void set_draw(int x, int y, int w, int h) {
         char t[12]; kitoa(t, cfg.bright); kstrcat(t, "%", sizeof t);
         gfx_text(F_MD, cx + 444, cy + 40, t, WHITE_A(200));
         focus_ring(2, cx, cy + 40, 420, 28);
-    } else if (s_page == 1) {
+    } else if (s_page == P_INPUT) {
         label(cx, cy, "Pointer speed");
         int nv = ui_slider(2, cx, cy + 42, 420, cfg.mspeed, 1, 4);
         if (nv != cfg.mspeed) { cfg.mspeed = nv; changed(); }
@@ -622,7 +631,29 @@ void set_draw(int x, int y, int w, int h) {
         info_row(cx, cy + 44, cw, "Keyboard", "PS/2 keyboard (US layout) - connected");
         info_row(cx, cy + 80, cw, "Pointer", mouse_ok ? (mouse_has_wheel ? "PS/2 mouse with scroll wheel - connected" : "PS/2 mouse - connected") : "No PS/2 mouse detected");
         info_row(cx, cy + 116, cw, "Storage", disk_present() ? (disk_is_ahci() ? "SATA AHCI disk - connected" : "ATA PIO disk - connected") : "No disk detected");
-    } else if (s_page == 2) {
+    } else if (s_page == P_SOUND) {
+        label(cx, cy, "System sounds");
+        if (ui_toggle(cx + 400, cy - 2, cfg.sound)) { cfg.sound = !cfg.sound; changed(); if (cfg.sound) snd_play(SND_OK); }
+        focus_ring(0, cx + 400, cy - 2, 52, 28);
+        gfx_text(F_SM, cx, cy + 32, "Beeps and chimes for navigation, notifications and errors", WHITE_A(130));
+        cy += 84; label(cx, cy, "Volume");
+        int nv = ui_slider(3, cx, cy + 42, 420, cfg.volume, 0, 100);
+        if (nv != cfg.volume) { cfg.volume = nv; changed(); if (ticks() - s_vsnd > 50) { s_vsnd = ticks(); snd_play(SND_NAV); } }
+        char t[12]; kitoa(t, cfg.volume); kstrcat(t, "%", sizeof t);
+        gfx_text(F_MD, cx + 444, cy + 40, t, WHITE_A(200));
+        focus_ring(1, cx, cy + 40, 420, 28);
+        cy += 100; label(cx, cy, "Try a sound");
+        int ty = cy + 40;
+        if (ui_btn(cx, ty, 56, 40, "<", 0)) adjust_test(-1);
+        gfx_rrect(cx + 66, ty, 250, 40, 12, WHITE_A(18), WHITE_A(18), 0);
+        gfx_text_c(F_MD, cx + 66 + 125, ty + 8, s_tnames[s_tsnd], 0xFFFFFFFF);
+        if (ui_btn(cx + 326, ty, 56, 40, ">", 0)) adjust_test(1);
+        if (ui_btn(cx + 396, ty, 110, 40, "Play", 1)) snd_test(s_tsnd);
+        focus_ring(2, cx, ty, 506, 40);
+        cy += 112; label(cx, cy, "Output device");
+        gfx_text(F_MD, cx + 190, cy + 2, snd_device_name(), snd_device() == 1 ? 0xFFFFFFFF : 0xFFFFC857);
+        if (snd_device() != 1) gfx_text(F_SM, cx, cy + 36, "No sound card found. QEMU: -device AC97   VirtualBox: Audio > Intel AC97", WHITE_A(130));
+    } else if (s_page == P_TIME) {
         int hh, mm, ss, dd, mo, yy; rtc_read(&hh, &mm, &ss, &dd, &mo, &yy);
         char t[40], n[8]; t[0] = 0;
         kitoa(n, hh); if (hh < 10) kstrcat(t, "0", sizeof t); kstrcat(t, n, sizeof t); kstrcat(t, ":", sizeof t);
@@ -645,7 +676,7 @@ void set_draw(int x, int y, int w, int h) {
         if (ui_btn(cx + 300, cy - 6, 56, 36, "-", 0)) { rtc_set_time(hh, (mm + 59) % 60); ui_wake(); }
         if (ui_btn(cx + 400, cy - 6, 56, 36, "+", 0)) { rtc_set_time(hh, (mm + 1) % 60); ui_wake(); }
         focus_ring(3, cx + 300, cy - 6, 156, 36);
-    } else if (s_page == 3) {
+    } else if (s_page == P_STORAGE) {
         int used = fs_blocks_used(); char t[64], n[16];
         label(cx, cy, "Internal storage");
         gfx_rrect(cx, cy + 46, cw - 20, 18, 9, WHITE_A(40), WHITE_A(40), 0);
@@ -676,5 +707,6 @@ void set_draw(int x, int y, int w, int h) {
         info_row(cx, cy + 144, cw, "Graphics", "Software renderer, SVG, PNG, antialiased text");
         t[0] = 0; int up = (int)(ticks() / 1000); kitoa(n, up / 60); kstrcat(t, n, sizeof t); kstrcat(t, " min ", sizeof t); kitoa(n, up % 60); kstrcat(t, n, sizeof t); kstrcat(t, " s", sizeof t);
         info_row(cx, cy + 180, cw, "Uptime", t);
+        info_row(cx, cy + 216, cw, "Audio", snd_device() == 1 ? "Intel AC'97" : (snd_device() == 2 ? "PC speaker" : "None"));
     }
 }

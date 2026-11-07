@@ -5,7 +5,7 @@ typedef unsigned short u16; typedef short s16;
 typedef unsigned int u32;  typedef int s32;
 typedef unsigned long long u64;
 #define NULL ((void*)0)
-#define KT_VERSION "2.1"
+#define KT_VERSION "2.2"
 
 /* ---------- lib.c ---------- */
 void *memcpy(void *d, const void *s, u32 n);
@@ -161,7 +161,7 @@ int  fat_dir_get(const char *dir, int idx, char *name, int cap, FatEnt *out); /*
 int  fat_read_file(const char *path, void *buf, int cap); /* bytes read or -1 (fit in cap) */
 
 /* ---------- settings ---------- */
-typedef struct { u32 magic; s32 accent, wall, bright, mspeed, h24, secs; } Settings;
+typedef struct { u32 magic; s32 accent, wall, bright, mspeed, h24, secs, sound, volume; } Settings;   /* sound = system sounds on/off, volume 0..100 */
 extern Settings cfg;
 extern const u32 accents[5];
 extern const char *accent_names[5];
@@ -324,6 +324,22 @@ void paint_open(void); void paint_close(void);
 int  paint_key(const Event *e);
 void paint_draw(int x, int y, int w, int h);
 u32  paint_static_bytes(void);
+
+/* ---------- audio.c : sound driver (Intel AC'97, PC speaker fallback) + system sounds ---------- */
+enum { SND_STARTUP, SND_SHUTDOWN, SND_NAV, SND_TAB, SND_BUMP, SND_OPEN, SND_BACK, SND_NOTIFY, SND_OK, SND_ERROR, SND_WARN, SND_SHOT, SND_PANIC, SND_COUNT };
+void snd_init(void);                       /* probe the sound hardware (after settings are loaded) */
+void snd_play(int id);                     /* start a system sound; honours cfg.sound, never blocks */
+void snd_test(int id);                     /* same, but plays even when system sounds are switched off */
+void snd_stop(void);
+void snd_tick(void);                       /* call from the main loop (drives the PC speaker sequencer) */
+void snd_wait(int max_ms);                 /* block until the current sound has finished */
+void snd_panic(void);                      /* panic-screen alarm, safe without interrupts */
+void snd_volume(void);                     /* apply cfg.volume to the hardware mixer */
+int  snd_busy(void);
+int  snd_device(void);                     /* 0 none, 1 AC'97, 2 PC speaker */
+const char *snd_device_name(void);
+int  snd_for_message(const char *msg);     /* SND_ERROR / SND_OK / SND_NOTIFY for a toast text */
+u32  audio_static_bytes(void);
 
 /* ---------- kmalloc.c : kernel heap ---------- */
 void *kmalloc(u32 n);

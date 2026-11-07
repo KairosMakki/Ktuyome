@@ -95,7 +95,8 @@ static void zip_extract_sel(void) {
     mz_zip_reader_end(&za);
     fs_save();
     zip_refresh();
-    ui_flash(ok ? "Extracted" : "Extracted with errors");
+    char msg[48]; kstrcpy(msg, "Extracted ", sizeof msg); char nbuf[12]; kitoa(nbuf, n); kstrcat(msg, nbuf, sizeof msg); kstrcat(msg, ok ? " files" : " files (errors)", sizeof msg);
+    ui_flash(msg);
 }
 
 static void zip_add_node(mz_zip_archive *za, int node, const char *prefix, int *ok) {
@@ -315,7 +316,9 @@ void zip_draw(int x, int y, int w, int h) {
                 mz_zip_archive za; mz_zip_zero_struct(&za);
                 if (mz_zip_reader_init_mem(&za, data, (size_t)size, 0)) {
                     mz_uint n = mz_zip_reader_get_num_files(&za);
-                    char t[48]; kstrcpy(t, "Entries: ", sizeof t); char nbuf[12]; kitoa(nbuf, n); kstrcat(t, nbuf, sizeof t);
+                    mz_uint64 total = 0;
+                    for (mz_uint i = 0; i < n; i++) { mz_zip_archive_file_stat st; if (mz_zip_reader_file_stat(&za, i, &st)) total += st.m_uncomp_size; }
+                    char t[64]; kstrcpy(t, "Entries: ", sizeof t); char nbuf[12]; kitoa(nbuf, n); kstrcat(t, nbuf, sizeof t); kstrcat(t, "  Size: ", sizeof t); kitoa(nbuf, (int)(total / 1024)); kstrcat(t, nbuf, sizeof t); kstrcat(t, " KB", sizeof t);
                     gfx_text(F_SM, px + 20, top + 160, t, WHITE_A(150));
                     int yy = top + 186;
                     mz_uint show = n < 8 ? n : 8;

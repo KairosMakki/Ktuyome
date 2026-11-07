@@ -1,6 +1,7 @@
 CC      = gcc
-CFLAGS  = -m32 -O2 -std=gnu11 -ffreestanding -fno-pie -fno-pic -fno-stack-protector -fno-builtin \
+CFLAGS  = -m32 -O3 -std=gnu11 -ffreestanding -fno-pie -fno-pic -fno-stack-protector -fno-builtin \
           -fno-strict-aliasing -fno-tree-loop-distribute-patterns -mno-sse -mno-mmx -mno-sse2 -mfpmath=387 \
+          -fomit-frame-pointer -DNDEBUG \
           -Wall -Wno-unused-function -Wno-misleading-indentation -Isrc
 LIBGCC  = $(shell $(CC) -m32 -print-libgcc-file-name)
 SRC     = boot.S lib.c arch.c gfx.c svg.c fs.c ui.c apps.c apps2.c taskmgr.c net.c netapp.c fontdata.c \

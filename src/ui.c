@@ -614,7 +614,7 @@ void kmain(u32 magic, u32 mbi) {
         if (bl != g_blink) { g_blink = bl; if (cur_app >= 0) dirty = 1; }
         if (toast_until && now > toast_until) { toast_until = 0; dirty = 1; }
         apps_tick();
-        if ((dirty || busy) && now - last_frame >= 14) {
+        if ((dirty || busy) && now - last_frame >= 12) {
             dirty = 0; render(); g_click = 0; g_wheel = 0; last_frame = ticks();
             if (busy) dirty = 1;
         } else { u64 h0 = rdtsc(); __asm__ volatile("hlt"); lidle = rdtsc() - h0; }

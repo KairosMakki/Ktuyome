@@ -1,0 +1,17 @@
+# Build outputs
+build/
+*.iso
+*.img
+disk.img
+*.elf
+*.o
+
+# Editor/OS junk
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Python caches
+__pycache__/
+*.pyc

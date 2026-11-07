@@ -1,3 +1,4 @@
+#undef _FORTIFY_SOURCE
 #define _FORTIFY_SOURCE 0
 #include "ktuyome.h"
 #define tolower(c) (((c) >= 'A' && (c) <= 'Z') ? (c) + 32 : (c))

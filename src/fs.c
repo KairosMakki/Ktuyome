@@ -181,6 +181,12 @@ static const char *readme =
 "  Ctrl+C / Ctrl+X / Ctrl+V   copy, cut, paste     Ctrl+A   select all\n"
 "  Shift+arrows select text; drag with the mouse; double-click a word\n"
 "  Files: Ctrl+C / Ctrl+X pick an item, Ctrl+V pastes it in the open folder\n\n"
+"Downloads and FAT32 (2.1)\n"
+"  Network app: wget <url> fetches a file over http or https\n"
+"  and saves it to /downloads.\n"
+"  Files: press FAT32 to browse a plain FAT32 disk attached\n"
+"  as a second drive (QEMU: make runfat); Enter copies a\n"
+"  file into the current KTFS folder.\n\n"
 "Icons are plain SVG files in /system/icons. Edit one in the\n"
 "Text Editor, press Ctrl+S, and the home screen updates at once.\n"
 "A PNG with the same name (for example notes.png) replaces the SVG.\n";
@@ -189,7 +195,7 @@ static void make_defaults(void) {
     memset(fs_nodes, 0, sizeof fs_nodes); memset(blk_used, 0, sizeof blk_used);
     fs_nodes[0].used = 1; fs_nodes[0].type = FS_DIR; fs_nodes[0].parent = -1; fs_nodes[0].blk = -1;
     fs_create("/system", FS_DIR); fs_create("/system/icons", FS_DIR);
-    fs_create("/notes", FS_DIR); fs_create("/docs", FS_DIR); fs_create("/images", FS_DIR);
+    fs_create("/notes", FS_DIR); fs_create("/docs", FS_DIR); fs_create("/images", FS_DIR); fs_create("/downloads", FS_DIR);
     char path[64];
     for (int i = 0; i < IC_COUNT; i++) {
         kstrcpy(path, "/system/icons/", sizeof path); kstrcat(path, icon_names[i], sizeof path); kstrcat(path, ".svg", sizeof path);
@@ -202,7 +208,7 @@ static void make_defaults(void) {
 }
 void fs_init(void) {
     disk_ok = disk_present();
-    if (disk_ok && load_disk()) { fs_create("/images", FS_DIR); return; }      /* disks made by 1.3 or older get the folder too */
+    if (disk_ok && load_disk()) { fs_create("/images", FS_DIR); fs_create("/downloads", FS_DIR); return; }      /* disks made by 1.3 or older get the folder too */
     make_defaults();
     fs_save();
 }

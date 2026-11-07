@@ -5,7 +5,7 @@ typedef unsigned short u16; typedef short s16;
 typedef unsigned int u32;  typedef int s32;
 typedef unsigned long long u64;
 #define NULL ((void*)0)
-#define KT_VERSION "2.0"
+#define KT_VERSION "2.1"
 
 /* ---------- lib.c ---------- */
 void *memcpy(void *d, const void *s, u32 n);
@@ -36,8 +36,8 @@ static inline void outw(u16 p, u16 v) { __asm__ volatile("outw %0,%1" :: "a"(v),
 static inline u16 inw(u16 p) { u16 v; __asm__ volatile("inw %1,%0" : "=a"(v) : "Nd"(p)); return v; }
 static inline void outl(u16 p, u32 v) { __asm__ volatile("outl %0,%1" :: "a"(v), "Nd"(p)); }
 static inline u32 inl(u16 p) { u32 v; __asm__ volatile("inl %1,%0" : "=a"(v) : "Nd"(p)); return v; }
-static inline u32 mmio_rd32(void *a) { u32 volatile *p = (u32 volatile *)a; return *p; }
-static inline void mmio_wr32(void *a, u32 v) { u32 volatile *p = (u32 volatile *)a; *p = v; }
+static inline u32 mmio_rd32(const volatile void *a) { return *(const volatile u32 *)a; }
+static inline void mmio_wr32(volatile void *a, u32 v) { *(volatile u32 *)a = v; }
 static inline void mmio_wait(void) { __asm__ volatile("" ::: "memory"); }
 
 void arch_init(void);
@@ -145,6 +145,20 @@ void fs_format(void);
 int  fs_has_disk(void);
 int  fs_read_text(const char *path, char *out, int cap);  /* returns length or -1 */
 int  fs_write_text(const char *path, const char *s, int len);
+
+/* ---------- fat32.c : read-only FAT32 drive on the second IDE device ---------- */
+/* Attach a FAT32 volume with "make runfat" (QEMU -hdb fat.img) or a hardware primary slave;
+ * the Files app shows it under the FAT32 button and copies items into KTFS. */
+int  fat_disk_present(void);                            /* second IDE drive found (e.g. QEMU -hdb) */
+u32  fat_disk_sectors(void);
+int  fat_disk_read(u32 lba, void *buf, int nsec);
+typedef struct { u32 size; u32 cluster; int is_dir; } FatEnt;
+int  fat_mount(void);                                   /* find + mount the volume; 1 = ok */
+int  fat_present(void);                                 /* a volume currently mounted */
+const char *fat_status(void);                           /* mount result message for the UI */
+int  fat_lookup(const char *path, FatEnt *out);         /* 1 = ok; path like "/dir/file" */
+int  fat_dir_get(const char *dir, int idx, char *name, int cap, FatEnt *out); /* idx-th entry; -1 = end */
+int  fat_read_file(const char *path, void *buf, int cap); /* bytes read or -1 (fit in cap) */
 
 /* ---------- settings ---------- */
 typedef struct { u32 magic; s32 accent, wall, bright, mspeed, h24, secs; } Settings;

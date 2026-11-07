@@ -501,6 +501,54 @@ int disk_present(void) { return ahci_ok || ata_ok; }
 u32 disk_sectors(void) { return ahci_ok ? ahci_secs : ata_secs; }
 int disk_is_ahci(void) { return ahci_ok; }
 
+/* ============ second IDE drive: the slave of the primary channel ============ */
+/* QEMU's PC machine attaches -hdb (and VirtualBox a "primary slave") here. The KTFS system disk is
+ * the master, so nothing writes to this drive; the FAT32 driver only needs reads. */
+static int ata2_ok; static u32 ata2_secs;
+static int ata2_wait(int drq) {
+    for (int i = 0; i < 400000; i++) {
+        u8 s = inb(0x1F7);
+        if (s == 0xFF) return 0;
+        if (s & 1) return 0;
+        if (!(s & 0x80) && (!drq || (s & 8))) return 1;
+    }
+    return 0;
+}
+static void ata2_init(void) {
+    if (inb(0x1F7) == 0xFF) return;
+    outb(0x1F6, 0xF0);                                   /* select slave */
+    for (volatile int i = 0; i < 800; i++) {}
+    if (inb(0x1F4) | inb(0x1F5)) { inb(0x1F7); return; }  /* floating/not ATA */
+    outb(0x1F2, 0); outb(0x1F3, 0); outb(0x1F4, 0); outb(0x1F5, 0);
+    outb(0x1F7, 0xEC);                                   /* IDENTIFY DEVICE */
+    if (inb(0x1F7) == 0) return;
+    if (inb(0x1F4) || inb(0x1F5)) return;                /* no slave settled, EXDEV/ATAPI signature */
+    if (!ata2_wait(1)) return;
+    u16 id[256];
+    for (int i = 0; i < 256; i++) id[i] = inw(0x1F0);
+    ata2_secs = id[60] | ((u32)id[61] << 16);
+    ata2_ok = ata2_secs > 64;
+}
+int fat_disk_present(void) { return ata2_ok; }
+u32 fat_disk_sectors(void) { return ata2_secs; }
+static int ata2_read(u32 lba, void *buf, int nsec) {
+    if (!ata2_ok) return 0;
+    u16 *p = buf;
+    while (nsec > 0) {
+        int n = nsec > 128 ? 128 : nsec;
+        outb(0x1F6, 0xF0 | ((lba >> 24) & 0x0F));
+        outb(0x1F2, (u8)n); outb(0x1F3, lba); outb(0x1F4, lba >> 8); outb(0x1F5, lba >> 16);
+        outb(0x1F7, 0x20);
+        for (int s = 0; s < n; s++) {
+            if (!ata2_wait(1)) return 0;
+            __asm__ volatile("rep insw" : "+D"(p) : "d"((u16)0x1F0), "c"(256) : "memory");
+        }
+        lba += n; nsec -= n;
+    }
+    return 1;
+}
+int fat_disk_read(u32 lba, void *buf, int nsec) { return ata2_read(lba, buf, nsec); }
+
 /* ---- storage bring-up: PCI scan, AHCI if present, else legacy ATA PIO ---- */
 static int find_ahci_controller(void) {
     for (int i = 0; i < pci_count; i++) {
@@ -553,8 +601,12 @@ static void storage_init(void) {
     dbg_puts("PCI: "); char t[8]; kitoa(t, pci_count); dbg_puts(t); dbg_puts(" devices\n");
     if (find_ahci_controller()) ahci_init();
     if (!ahci_ok) ata_init();
+    ata2_init();                                             /* second IDE drive (FAT32 disk from -hdb) */
     if (ahci_ok) dbg_puts("DISK: ahci\n"); else if (ata_ok) dbg_puts("DISK: ata-pio\n"); else dbg_puts("DISK: none\n");
+    if (ata2_ok) { dbg_puts("DISK2: ata-pio slave\n"); } else dbg_puts("DISK2: none\n");
     disk_selftest();
+    fat_mount();                                             /* second IDE drive: probe for a FAT32 volume (read-only) */
+    dbg_puts("FAT32: "); dbg_puts(fat_status()); dbg_puts("\n");
 }
 
 /* ============================ power ============================ */

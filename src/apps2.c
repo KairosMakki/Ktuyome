@@ -1,10 +1,15 @@
+#undef _FORTIFY_SOURCE
 #define _FORTIFY_SOURCE 0
 #include "ktuyome.h"
 #define MINIZ_NO_STDIO
 #define MINIZ_NO_TIME
+#ifndef NDEBUG
 #define NDEBUG
+#endif
 #include "vendor/miniz/miniz.h"
 #define tolower(c) (((c) >= 'A' && (c) <= 'Z') ? (c) + 32 : (c))
+
+static void files_refresh(void);                               /* (defined below; used by the FAT32 mode) */
 
 /* ============================== Files ============================== */
 static int f_dir, f_ids[FS_MAX + 1], f_n, f_sel, f_scroll, f_prev = -2, f_prev_size = -1;
@@ -14,6 +19,11 @@ static Prompt f_pr; static u32 f_bmp[256 * 256];
 static int f_pw, f_ph, f_pok;                                  /* PNG preview cache: source size, decoded ok */
 static PngImage f_view; static int f_view_id = -1;            /* full-size PNG viewer (Enter on a .png) */
 static int fc_node = -1, fc_parent, fc_cut; static char fc_name[28];      /* file clipboard: what Ctrl+C / Ctrl+X picked */
+/* FAT32 browse mode: the Files list shows the read-only FAT32 volume that "make runfat"
+ * (or a hardware secondary IDE disk) provides; Enter copies the file into KTFS. */
+static int f_fat;                                              /* 1 = showing the FAT32 volume */
+static char f_fpath[96];                                       /* current FAT32 directory path */
+static char f_fn[FS_MAX][52]; static u32 f_fsz[FS_MAX]; static int f_fdir[FS_MAX];
 
 static int contains_ci(const char *hay, const char *needle) {
     if (!needle || !needle[0]) return 1;
@@ -24,7 +34,77 @@ static int contains_ci(const char *hay, const char *needle) {
     }
     return 0;
 }
+
+/* ---- FAT32 browse mode (read-only, items copied into KTFS on Enter) ---- */
+static void fat_trim_last(void);                               /* step up one directory */
+static void unique_name(int dir, const char *base, char *out); /* (defined below) */
+static void fat_refresh(void) {
+    f_n = 0;
+    if (fat_lookup(f_fpath, &(FatEnt){0}) == 0) { f_fpath[0] = '/'; f_fpath[1] = 0; }   /* stale path: root */
+    /* ".." once below the root */
+    if (!(f_fpath[0] == '/' && f_fpath[1] == 0) && f_n < FS_MAX) f_ids[f_n++] = -2;
+    for (int i = 0; f_n < FS_MAX; i++) {
+        FatEnt fe; char nm[64];
+        int r = fat_dir_get(f_fpath, i, nm, (int)sizeof nm, &fe);
+        if (r != 1) break;
+        if (nm[0] == '.' && (nm[1] == 0 || nm[1] == '.')) continue;    /* internal dot links are hidden */
+        if (f_search[0] && !contains_ci(nm, f_search)) continue;
+        int k = f_n;                                           /* list index of this entry */
+        char nn[28]; int wl = 0;
+        for (char *q = nm; *q && wl < 27; q++) nn[wl++] = *q; nn[wl] = 0;
+        kstrcpy(f_fn[k], nn, sizeof f_fn[k]); f_fsz[k] = fe.size; f_fdir[k] = fe.is_dir;
+        f_ids[f_n++] = -(10 + k);
+    }
+    f_sel = iclamp(f_sel, 0, imax(0, f_n - 1)); f_prev = -2;
+    memset(f_selected, 0, sizeof f_selected);
+}
+static void fat_leave(void) { f_fat = 0; f_sel = 0; f_scroll = 0; f_search[0] = 0; f_searching = 0; files_refresh(); }
+static void fat_trim_last(void) {
+    int len = (int)strlen(f_fpath);
+    while (len > 0 && f_fpath[len - 1] == '/') len--;
+    while (len > 0 && f_fpath[len - 1] != '/') len--;
+    if (len <= 1) { kstrcpy(f_fpath, "/", sizeof f_fpath); }    /* at "/" ".." leaves FAT mode */
+    else f_fpath[len] = 0;
+    f_sel = 0; f_scroll = 0; files_refresh();
+}
+static void fat_jump(void) {                                   /* Enter on a FAT32 item */
+    if (f_sel < 0 || f_sel >= f_n) return;
+    int id = f_ids[f_sel];
+    if (id == -2) { fat_trim_last(); return; }
+    if (id >= 0) return;
+    int k = -id - 10;
+    char p[110];
+    kstrcpy(p, f_fpath, sizeof p);
+    if (!(p[0] == '/' && p[1] == 0)) kstrcat(p, "/", sizeof p);
+    kstrcat(p, f_fn[k], sizeof p);
+    if (f_fdir[k]) {                                           /* into the folder */
+        kstrcpy(f_fpath, p, sizeof f_fpath);
+        f_sel = 0; f_scroll = 0; files_refresh();
+        return;
+    }
+    /* import: the file becomes a copy inside the currently shown KTFS folder */
+    u32 bytes = f_fsz[k];
+    if (bytes > FS_NBLK * FS_BLK) { ui_flash("Too big for KTFS storage (7.5 MB cap)"); return; }
+    void *b = kcalloc(1, bytes ? (u32)bytes : 1);
+    if (!b) { ui_flash("Not enough memory for the copy"); return; }
+    int r = fat_read_file(p, b, (int)bytes + 1);
+    if (r != (int)bytes) { kfree(b); ui_flash("Could not read the file (damage?)"); return; }
+    char nm[28]; unique_name(f_dir, f_fn[k], nm);
+    char dp[128]; fs_path(f_dir, dp, sizeof dp);
+    if (f_dir) kstrcat(dp, "/", sizeof dp);
+    kstrcat(dp, nm, sizeof dp);
+    int nd = fs_create(dp, FS_FILE);
+    if (nd < 0) { kfree(b); ui_flash("Could not create (name taken or files full)"); return; }
+    if (fs_write(nd, b, (int)bytes) < 0) { fs_delete(nd); kfree(b); ui_flash("Storage full: not imported"); return; }
+    kfree(b);
+    fs_save(); files_refresh();
+    for (int i = 0; i < f_n; i++) if (f_ids[i] == nd) f_sel = i;
+    { char dp2[96]; fs_path(f_dir, dp2, sizeof dp2); if (starts_with(dp2, "/system/icons")) ui_reload_icons(); }
+    char msg[60]; kstrcpy(msg, "Imported ", sizeof msg); kstrcat(msg, nm, sizeof msg);
+    ui_flash(msg);
+}
 static void files_refresh(void) {
+    if (f_fat) { fat_refresh(); return; }
     if (f_dir < 0 || !fs_nodes[f_dir].used || fs_nodes[f_dir].type != FS_DIR) f_dir = 0;
     f_n = 0;
     if (f_dir != 0) f_ids[f_n++] = -2;                                  /* ".." */
@@ -36,13 +116,14 @@ static void files_refresh(void) {
     f_sel = iclamp(f_sel, 0, imax(0, f_n - 1)); f_prev = -2;
     memset(f_selected, 0, sizeof f_selected);
 }
-u32 files_static_bytes(void) { return (u32)(sizeof f_bmp + sizeof f_ids + sizeof f_pr); }
+u32 files_static_bytes(void) { return (u32)(sizeof f_bmp + sizeof f_ids + sizeof f_pr + sizeof f_fn + sizeof f_fsz + sizeof f_fdir); }
 static void view_close(void) { png_free(&f_view); f_view_id = -1; }
 void files_open(void) { view_close(); { char b[16]; if (fs_read_text("/system/filesdir.txt", b, sizeof b) >= 0) { int d = katoi(b); if (d >= 0 && d < FS_MAX && fs_nodes[d].used && fs_nodes[d].type == FS_DIR) f_dir = d; } } files_refresh(); }
 void files_close(void) { view_close(); }
 void files_invalidate(void) { files_refresh(); }
 static void files_activate(int i) {
     if (i < 0 || i >= f_n) return;
+    if (f_fat) { fat_jump(); return; }
     int id = f_ids[i];
     if (id == -2) { f_dir = fs_nodes[f_dir].parent; f_sel = 0; files_refresh(); return; }
     if (fs_nodes[id].type == FS_DIR) { f_dir = id; f_sel = 0; f_scroll = 0; files_refresh(); { char b[16]; kitoa(b, f_dir); fs_write_text("/system/filesdir.txt", b, (int)strlen(b)); } return; }
@@ -221,6 +302,20 @@ int files_key(const Event *e) {
     }
     if ((e->mods & MOD_CTRL) && (e->key == 'f' || e->key == 'F')) { f_searching = 1; f_search[0] = 0; files_refresh(); return 1; }
     if (e->ch == '/') { f_searching = 1; f_search[0] = 0; files_refresh(); return 1; }
+    if (f_fat) {                                               /* FAT32 volume: navigation and import only */
+        switch (e->key) {
+            case K_UP: if (f_sel > 0) f_sel--; return 1;
+            case K_DOWN: if (f_sel < f_n - 1) f_sel++; return 1;
+            case K_PGUP: f_sel = imax(0, f_sel - 8); return 1;
+            case K_PGDN: f_sel = imin(f_n - 1, f_sel + 8); return 1;
+            case K_HOME: f_sel = 0; return 1;
+            case K_END: f_sel = imax(0, f_n - 1); return 1;
+            case K_ENTER: case K_RIGHT: fat_jump(); return 1;
+            case K_BS: case K_LEFT: if (f_fpath[0] == '/' && f_fpath[1] == 0) { ui_flash("Read-only: press F8 to leave the FAT32 view"); return 1; } fat_trim_last(); return 1;
+            case K_ESC: fat_leave(); return 1;
+        }
+        return 0;
+    }
     if ((e->mods & MOD_CTRL) && (e->key == 'a' || e->key == 'A')) {
         for (int i = 0; i < f_n; i++) if (f_ids[i] >= 0) f_selected[f_ids[i]] = 1;
         return 1;
@@ -272,17 +367,30 @@ static void view_draw(int x, int y, int w, int h) {
 }
 void files_draw(int x, int y, int w, int h) {
     if (f_view.px) { view_draw(x, y, w, h); return; }
-    char path[110]; fs_path(f_dir, path, sizeof path);
+    char path[110];
+    if (f_fat) { kstrcpy(path, "FAT32: /", sizeof path); if (f_fpath[1]) kstrcat(path, f_fpath + 1, sizeof path); }
+    else fs_path(f_dir, path, sizeof path);
     char title[160]; kstrcpy(title, path, sizeof title);
     if (f_search[0] || f_searching) { kstrcat(title, "   search: ", sizeof title); kstrcat(title, f_search, sizeof title); if (f_searching) kstrcat(title, "_", sizeof title); }
-    gfx_rrect(x, y, w - 760, 40, 12, WHITE_A(20), WHITE_A(20), 0);
+    gfx_rrect(x, y, w - 920, 40, 12, WHITE_A(20), WHITE_A(20), 0);
     gfx_text(F_MD, x + 16, y + 8, title, 0xFFFFFFFF);
-    int bx = x + w - 760;
-    if (ui_btn(bx, y + 2, 140, 36, "New file", 1) && !f_pr.active) pr_open(&f_pr, "New file name", "", 1);
-    if (ui_btn(bx + 150, y + 2, 160, 36, "New folder", 0) && !f_pr.active) pr_open(&f_pr, "New folder name", "", 2);
-    if (ui_btn(bx + 320, y + 2, 148, 36, "Delete", 0) && !f_pr.active) files_delete_sel();
-    if (ui_btn(bx + 478, y + 2, 120, 36, "Search", 0) && !f_pr.active) { f_searching = 1; f_search[0] = 0; files_refresh(); }
-    if (ui_btn(bx + 606, y + 2, 136, 36, "Zip sel", 0) && !f_pr.active) files_zip_selected();
+    int bx = x + w - 920;
+    if (f_fat) {
+        if (ui_btn(bx, y + 2, 140, 36, "KTFS", 1)) fat_leave();
+    } else {
+        if (ui_btn(bx, y + 2, 140, 36, "New file", 1) && !f_pr.active) pr_open(&f_pr, "New file name", "", 1);
+        if (ui_btn(bx + 150, y + 2, 160, 36, "New folder", 0) && !f_pr.active) pr_open(&f_pr, "New folder name", "", 2);
+        if (ui_btn(bx + 320, y + 2, 148, 36, "Delete", 0) && !f_pr.active) files_delete_sel();
+        if (ui_btn(bx + 478, y + 2, 120, 36, "Search", 0) && !f_pr.active) { f_searching = 1; f_search[0] = 0; files_refresh(); }
+        if (ui_btn(bx + 606, y + 2, 136, 36, "Zip sel", 0) && !f_pr.active) files_zip_selected();
+    }
+    if (ui_btn(bx + 752, y + 2, 148, 36, f_fat ? "KTFS" : "FAT32", f_fat ? 0 : 1)) {
+        if (f_fat) fat_leave();
+        else if (fat_present() || fat_mount()) {
+            f_fat = 1; kstrcpy(f_fpath, "/", sizeof f_fpath); f_sel = 0; f_scroll = 0; f_search[0] = 0; f_searching = 0; files_refresh();
+            ui_flash(fat_status());
+        } else ui_flash(fat_status());
+    }
     int top = y + 54, ah = h - 54, lw = w * 58 / 100, rh = 42, rows = ah / rh;
     ui_panel(x, top, lw, ah, WHITE_A(12));
     if (g_wheel && ui_hover(x, top, lw, ah) && !f_pr.active) f_scroll = iclamp(f_scroll + g_wheel * 2, 0, imax(0, f_n - rows));
@@ -293,8 +401,8 @@ void files_draw(int x, int y, int w, int h) {
         int ry = top + 4 + (i - f_scroll) * rh, id = f_ids[i], on = i == f_sel;
         if (on) gfx_rrect(x + 6, ry, lw - 12, rh - 4, 12, col_alpha(ACC, 120), col_alpha(ACC, 120), 0);
         else if (ui_hover(x + 6, ry, lw - 12, rh - 4)) gfx_rrect(x + 6, ry, lw - 12, rh - 4, 12, WHITE_A(18), WHITE_A(18), 0);
-        const char *nm = id == -2 ? ".." : fs_nodes[id].name;
-        int isdir = id == -2 || fs_nodes[id].type == FS_DIR;
+        const char *nm = id == -2 ? ".." : (f_fat ? f_fn[-id - 10] : fs_nodes[id].name);
+        int isdir = id == -2 || (f_fat ? f_fdir[-id - 10] : fs_nodes[id].type == FS_DIR);
         u32 c1 = isdir ? 0xFFFFC857 : (ends_with(nm, ".svg") ? 0xFF7AD7F0 : (png_is(nm) ? 0xFF9CE29B : 0xFFC9D1E3));
         gfx_rrect(x + 20, ry + 9, 26, 20, 5, c1, col_lerp(c1, 0xFF000000, 40), 0);
         if (isdir) gfx_rrect(x + 20, ry + 6, 12, 6, 2, c1, c1, 0);
@@ -330,7 +438,7 @@ void files_draw(int x, int y, int w, int h) {
         }
         if (id >= 0 && f_selected[id]) gfx_text(F_MD, x + lw - 60, ry + 6, "[x]", 0xFF9CE29B);
         if (!isdir) {
-            char sz[24]; int s = (int)fs_nodes[id].size;
+            char sz[24]; int s = (int)(f_fat ? f_fsz[-id - 10] : fs_nodes[id].size);
             if (s >= 1024) { kitoa(sz, s / 1024); kstrcat(sz, " KB", sizeof sz); } else { kitoa(sz, s); kstrcat(sz, " B", sizeof sz); }
             gfx_text_r(F_SM, x + lw - 22, ry + 9, sz, WHITE_A(150));
         }
@@ -350,7 +458,25 @@ void files_draw(int x, int y, int w, int h) {
     ui_panel(px, top, pw, ah, WHITE_A(12));
     if (f_sel >= 0 && f_sel < f_n) {
         int id = f_ids[f_sel];
-        if (id >= 0) {
+        if (f_fat) {                                           /* FAT32 item: what Enter will do */
+            if (id == -2) gfx_text(F_MD, px + 20, top + 16, "Parent folder", WHITE_A(150));
+            else {
+                int k = -id - 10;
+                gfx_text(F_MDB, px + 20, top + 16, f_fn[k], 0xFFFFFFFF);
+                char lp[160]; kstrcpy(lp, "FAT32: ", sizeof lp); kstrcat(lp, f_fpath, sizeof lp); if (!(f_fpath[0] == '/' && !f_fpath[1])) kstrcat(lp, "/", sizeof lp); kstrcat(lp, f_fn[k], sizeof lp);
+                gfx_text(F_SM, px + 20, top + 44, lp, WHITE_A(130));
+                if (f_fdir[k]) gfx_text(F_MD, px + 20, top + 80, "Folder: Enter opens it, Esc returns to KTFS", WHITE_A(200));
+                else {
+                    char t[48], nn[16]; kstrcpy(t, "File, ", sizeof t); kitoa(nn, (int)f_fsz[k]); kstrcat(t, nn, sizeof t); kstrcat(t, " bytes", sizeof t);
+                    gfx_text(F_MD, px + 20, top + 80, t, WHITE_A(200));
+                    gfx_text(F_MD, px + 20, top + 116, "Enter (or double-click) copies this file", WHITE_A(200));
+                    gfx_text(F_MD, px + 20, top + 140, "into the current KTFS folder", WHITE_A(200));
+                    gfx_text(F_SM, px + 20, top + 176, "The FAT32 volume is mounted read-only.", WHITE_A(120));
+                }
+                gfx_text(F_SM, px + 20, top + ah - 40, f_fpath, WHITE_A(90));
+            }
+        }
+        else if (id >= 0) {
             Node *nd = &fs_nodes[id]; char p[96]; fs_path(id, p, sizeof p);
             gfx_text(F_MDB, px + 20, top + 16, nd->name, 0xFFFFFFFF);
             gfx_text(F_SM, px + 20, top + 44, p, WHITE_A(130));

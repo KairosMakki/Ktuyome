@@ -2,6 +2,8 @@
 /* Network app: a console for testing connectivity. Commands run as small state machines that are stepped from
  * na_tick() every pass of the main loop, so a ping keeps going (and keeps its output) when you leave the app. */
 
+#include "vendor/bearssl/bearssl.h"                    /* wget over https:// (TLS 1.2 client) */
+
 #define NL 400                                           /* scrollback lines */
 #define LW 128
 static char lines[NL][LW]; static u8 lcol[NL]; static int lcount;     /* lcount counts every line ever written */
@@ -24,7 +26,12 @@ static void say(int col, const char *s) { lb_reset(); lb_s(s); lb_flush(col); }
 static void lb_ms(u32 ms) { if (ms == 0) lb_s("<1 ms"); else { lb_i((int)ms); lb_s(" ms"); } }
 
 /* ---------------------------------- job state ---------------------------------- */
-enum { J_NONE, J_PING, J_TRACE, J_DNS, J_TCP, J_HTTP, J_SCAN, J_UDP };
+enum { J_NONE, J_PING, J_TRACE, J_DNS, J_TCP, J_HTTP, J_SCAN, J_UDP, J_WGET };
+static int parse_port(const char *s);                        /* (defined with the command line) */
+static u8 *w_buf; static u32 w_bufcap;                       /* wget download buffer (see below) */
+static u32 w_buflen; static int w_hdr_done;
+static int w_https, w_chunked, w_redirs; static u32 w_prog;
+static br_ssl_client_context wssl; static int wssl_ready;
 #define PING_ID 0x4B54
 #define TRACE_ID 0x4B55
 #define HBUF 16384
@@ -34,14 +41,15 @@ static struct {
     int count, sent, recvd, seq; u32 rmin, rmax, rsum; u32 sendt[64]; u8 st[64];
     int ttl, probe, done, hit; u32 hop_ip; char hopline[LW];
     int sock, port, p_end, open_n, off; char msg[80]; char path[96];
+    u32 clen; char oname[28];
 } job;
 
 static void job_end(void) {
     if (job.dns_h >= 0) net_dns_free(job.dns_h);
     if (job.sock >= 0) { if (job.kind == J_UDP) udp_close(job.sock); else tcp_free(job.sock); }
+    if (job.kind == J_WGET) { if (w_buf) { kfree(w_buf); w_buf = NULL; } w_bufcap = w_buflen = 0; wssl_ready = 0; }
     job.kind = J_NONE; job.dns_h = job.sock = -1; ui_wake();
-}
-static int net_ready(void) {
+}static int net_ready(void) {
     if (!net.present) { say(C_ERR, "No supported network card found."); say(C_DIM, "Ktuyome drives the Intel e1000, the default NIC in QEMU and VirtualBox (Intel PRO/1000)."); return 0; }
     if (!net.link) { say(C_ERR, "Network cable is unplugged (link down)."); return 0; }
     if (!net.ip) { say(C_ERR, net.dhcp == DHCP_FAILED ? "No DHCP server answered. Type 'dhcp' to retry or 'setip' to configure by hand." : "Still waiting for an address from DHCP..."); return 0; }
@@ -297,6 +305,277 @@ static void udp_step(void) {
     } else if (now - job.t1 > 2500) { say(C_WARN, "No reply (UDP is connectionless: the port may be closed or the service silent)."); job_end(); }
 }
 
+/* ---------------------------------- wget ---------------------------------- */
+/* "wget <url>" downloads over http:// or https:// (the vendored BearSSL TLS 1.2 client, the same
+ * one the browser uses) into /downloads. Follows up to three redirects and decodes chunked
+ * bodies; anything bigger than the KTFS storage pool (7.5 MB) is saved truncated, with a warning.
+ * (The wget state variables, W_* macros and the TLS context live above the job struct.) */
+static int wtls_recv_cb(void *ctx, u8 *buf, size_t len) { (void)ctx; int n = tcp_recv(job.sock, buf, (int)len); return n > 0 ? n : 0; }
+static int wtls_send_cb(void *ctx, const u8 *buf, size_t len) { (void)ctx; int n = tcp_send(job.sock, buf, (int)len); return n > 0 ? n : 0; }
+
+/* TLS-aware read/write on the job socket (plaintext once the handshake is done) */
+static int w_recv(void *b, int n) {
+    if (w_https && wssl_ready) return br_ssl_engine_recvapp_buf(&wssl.eng, b, (size_t)n);
+    return tcp_recv(job.sock, b, n);
+}
+static int w_send(const void *b, int n) {
+    if (w_https && wssl_ready) return br_ssl_engine_sendapp_buf(&wssl.eng, b, (size_t)n);
+    return tcp_send(job.sock, b, n);
+}
+
+static void w_reset_body(void) {
+    if (w_buf) { kfree(w_buf); w_buf = NULL; }
+    w_bufcap = w_buflen = 0; w_hdr_done = 0; w_chunked = 0; w_prog = 0; wssl_ready = 0;
+}
+#define W_CLEN_UNK 0xFFFFFFFFu
+#define W_SLICE 32768
+#define W_MAX (FS_NBLK * FS_BLK)
+
+/* grow the body buffer and append bytes; returns bytes actually stored (0 = nothing fits) */
+static int w_append(const u8 *d, int len) {
+    if (len <= 0) return 0;
+    int room = (int)(W_MAX - w_buflen);
+    if (room <= 0) return 0;
+    if (len > room) len = room;
+    if (!w_buf || (u32)(w_buflen + len) > w_bufcap) {
+        u32 want = w_buflen + (u32)len;
+        if (want < W_SLICE) want = W_SLICE;
+        u8 *nb = krealloc(w_buf, want);
+        if (!nb) return 0;
+        w_buf = nb; w_bufcap = want;
+    }
+    memcpy(w_buf + w_buflen, d, (u32)len);
+    w_buflen += (u32)len;
+    return len;
+}
+
+/* header find+copy: hbuf holds `he` header bytes; returns value length or -1 */
+static int w_hdr_val(int he, const char *needle, char *out, int cap) {
+    int nl = (int)strlen(needle), p = 0;
+    while (p < he) {
+        int e = p; while (e < he && hbuf[e] != '\n') e++;
+        if (e >= he) break;
+        if (e - p > nl && ci_starts(hbuf + p, needle)) {
+            int q = p + nl;
+            while (q < e && (hbuf[q] == ':' || hbuf[q] == ' ' || hbuf[q] == '\t')) q++;
+            int v = q; while (e > v && hbuf[e - 1] == '\r') e--;
+            int n = e - v; if (n > cap - 1) n = cap - 1;
+            memcpy(out, hbuf + v, (u32)n); out[n] = 0;
+            return n;
+        }
+        p = e + 1;
+    }
+    return -1;
+}
+static int w_status_code(void) {                             /* 3-digit code from the first line */
+    for (int i = 0; i < 16 && hbuf[i]; i++) if (hbuf[i] == ' ') return katoi(hbuf + i + 1);
+    return -1;
+}
+
+/* unique save path in /downloads for a base name; m is the download duration in ms */
+static void w_save_file(int truncated, u32 m) {
+    char name[28]; int w = 0;
+    const char *b = job.oname;
+    while (*b == '/') b++;
+    for (const char *q = b; *q && w < 27; q++) {
+        char c = *q;
+        if (c == '/' || c == '\\' || c == '?' || c == '%') c = '_';
+        if (c < 32 || c > 126) continue;
+        name[w++] = c;
+    }
+    name[w] = 0;
+    if (!name[0]) kstrcpy(name, "download.bin", sizeof name);
+    char p[80]; kstrcpy(p, "/downloads/", sizeof p); kstrcat(p, name, sizeof p);
+    for (int i = 1; fs_lookup(p) >= 0 && i < 100; i++) {
+        kstrcpy(p, "/downloads/", sizeof p); kstrcat(p, name, sizeof p);
+        char q[8]; kitoa(q, i + 1); kstrcat(p, "-", sizeof p); kstrcat(p, q, sizeof p);
+    }
+    fs_create("/downloads", FS_DIR);
+    int nd = fs_create(p, FS_FILE);
+    if (nd < 0) { say(C_ERR, "Could not create the file in /downloads (no room or name clash)."); return; }
+    if (fs_write(nd, w_buf, (int)w_buflen) < 0) { fs_delete(nd); fs_save(); files_invalidate(); say(C_ERR, "Storage full: the download was not kept."); return; }
+    fs_save(); files_invalidate();
+    lb_reset(); lb_s("Saved "); lb_s(p); lb_s(" ("); lb_i((int)w_buflen); lb_s(" bytes, "); lb_i((int)m); lb_s(" ms)"); lb_flush(truncated ? C_WARN : C_OK);
+}
+
+/* decode a chunked body in place (trailers after the last-chunk are dropped) */
+static void w_unchunk(void) {
+    u32 r = 0, wr = 0, guard = 0;
+    while (r < w_buflen && guard++ < W_MAX / 256) {
+        while (r < w_buflen && (w_buf[r] == '\r' || w_buf[r] == '\n')) r++;
+        u32 size = 0; int any = 0;
+        while (r < w_buflen && w_buf[r] != '\r' && w_buf[r] != '\n') {
+            char c = (char)w_buf[r];
+            int v = (c >= '0' && c <= '9') ? c - '0' : (c >= 'a' && c <= 'f') ? c - 'a' + 10 : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+            if (v < 0) break;
+            size = size * 16 + (u32)v; r++; any = 1;
+            if (size > W_MAX) break;
+        }
+        if (!any) break;
+        while (r < w_buflen && (w_buf[r] == '\r' || w_buf[r] == '\n')) r++;
+        if (size == 0) break;
+        if (r + size > w_buflen) break;                      /* stream ended inside a chunk */
+        memmove(w_buf + wr, w_buf + r, size);
+        wr += size; r += size;
+    }
+    w_buflen = wr;
+}
+
+/* parse "http://host[:port]/path" (host out 72, path out 96); 1 = ok */
+static int w_parse_url(char *u, char *host, int *port, char *path, int *https) {
+    *https = 0;
+    if (starts_with(u, "https://")) { *https = 1; u += 8; }
+    else if (starts_with(u, "http://")) u += 7;
+    else return 0;
+    char *fr = strchr(u, '#'); if (fr) *fr = 0;              /* fragments are not sent */
+    int i = 0;
+    while (u[i] && u[i] != '/' && i < 70) { host[i] = u[i]; i++; }
+    host[i] = 0;
+    if (!host[0]) return 0;
+    *port = *https ? 443 : 80;
+    for (int k = 0; host[k]; k++) if (host[k] == ':') { host[k] = 0; *port = parse_port(host + k + 1); break; }
+    if (!*port) return 0;
+    kstrcpy(path, u[i] ? u + i : "/", 96);
+    return 1;
+}
+/* begin (or restart, after a redirect) a download; u is an absolute URL */
+static int wget_start(const char *u) {
+    char url[200]; kstrcpy(url, u, sizeof url);
+    char host[72], path[96]; int port = 0, https;
+    if (!w_parse_url(url, host, &port, path, &https)) { say(C_ERR, "usage: wget http://host[:port]/path"); return 0; }
+    if (!job_start(J_WGET, host)) return 0;
+    w_https = https; job.port = port; kstrcpy(job.path, path, sizeof job.path);
+    const char *b = "/index.html";                           /* default save name from the URL tail */
+    for (const char *p = path; *p; p++) if (*p == '/' && p[1] && p[1] != '?') b = p + 1;
+    kstrcpy(job.oname, b, sizeof job.oname);
+    return 1;
+}
+
+static void wget_step(void) {
+    if (resolve_step() <= 0) return;
+    u32 now = ticks();
+    if (now - job.t0 > 60000) { say(C_ERR, "Download timed out after 60 s."); job_end(); return; }
+    if (job.phase == 1) {
+        w_reset_body();
+        job.sock = tcp_open(job.ip, (u16)job.port);
+        if (job.sock < 0) { say(C_ERR, "No free TCP socket."); job_end(); return; }
+        job.phase = 2; job.t1 = now; hlen = 0;
+        lb_reset(); lb_s("GET "); lb_s(w_https ? "https://" : "http://"); lb_s(job.host); lb_s(job.path); lb_s(" ..."); lb_flush(C_ACC);
+        return;
+    }
+    if (job.phase == 2) {                                    /* TCP connect, then TLS handshake */
+        int s = tcp_status(job.sock);
+        if (s == TCP_CONNECTING) return;
+        if (s != TCP_OPEN) {
+            lb_reset(); lb_s(s == TCP_REFUSED ? "Connection refused" : s == TCP_TIMEOUT ? "Connection timed out" : "Connection failed"); lb_flush(C_ERR);
+            job_end(); return;
+        }
+        if (!w_https) { job.phase = 3; job.off = 0; return; }
+        if (!wssl_ready) {
+            br_ssl_client_init_full(&wssl, NULL, 0);         /* no certificate verification (as in the browser) */
+            br_ssl_client_reset(&wssl, job.host, 0);
+            br_ssl_engine_set_io(&wssl.eng, wtls_recv_cb, wtls_send_cb, NULL);
+        }
+        br_ssl_engine_run(&wssl.eng);
+        if (br_ssl_engine_current_state(&wssl.eng) & BR_SSL_CLOSED) {
+            say(C_ERR, "TLS handshake failed (no shared cipher or bad key exch)."); job_end(); return;
+        }
+        if (wssl.eng.hs == TLS_HS_DONE) { wssl_ready = 1; job.phase = 3; job.off = 0; }
+        return;
+    }
+    if (job.phase == 3) {                                    /* send the request */
+        static char req[560]; req[0] = 0;
+        kstrcat(req, "GET ", sizeof req); kstrcat(req, job.path, sizeof req); kstrcat(req, " HTTP/1.1\r\nHost: ", sizeof req);
+        kstrcat(req, job.host, sizeof req);
+        if (job.port != (w_https ? 443 : 80)) { kstrcat(req, ":", sizeof req); char t[8]; kitoa(t, job.port); kstrcat(req, t, sizeof req); }
+        kstrcat(req, "\r\nUser-Agent: Ktuyome/" KT_VERSION " (wget)\r\nAccept: */*\r\nConnection: close\r\n\r\n", sizeof req);
+        int rl = (int)strlen(req);
+        if (job.off < rl) { int n = w_send(req + job.off, rl - job.off); if (n > 0) job.off += n; }
+        if (job.off >= rl) { job.phase = 4; job.t1 = now; }
+        return;
+    }
+
+    /* phase 4: receive */
+    static u8 tmp[2048];
+    int n;
+    while ((n = w_recv(tmp, sizeof tmp)) > 0) {
+        if (!w_hdr_done) {
+            int take = imin(n, HBUF - 1 - hlen);             /* headers gather in hbuf until CRLFCRLF */
+            if (take <= 0) { say(C_ERR, "Response header block is too large."); job_end(); return; }
+            int leftover = n - take;
+            memcpy(hbuf + hlen, tmp, (u32)take);
+            hlen += take;
+            int he = 0;
+            for (int i = 0; i + 3 < hlen; i++)
+                if (hbuf[i] == '\r' && hbuf[i+1] == '\n' && hbuf[i+2] == '\r' && hbuf[i+3] == '\n') { he = i + 4; break; }
+            if (!he) continue;
+            hbuf[hlen] = 0;
+            int code = w_status_code();
+            if (code >= 300 && code < 400) {                 /* redirect, up to three hops */
+                char loc[200]; int ll = w_hdr_val(he, "Location", loc, (int)sizeof loc);
+                if (ll > 0 && ++w_redirs <= 3) {
+                    int port2 = 0, https2 = 0; char host2[72], path2[96]; char u2[240];
+                    int absurl = starts_with(loc, "http://") || starts_with(loc, "https://");
+                    if (absurl) {
+                        if (!w_parse_url(loc, host2, &port2, path2, &https2)) { say(C_ERR, "Bad redirect URL."); job_end(); return; }
+                        kstrcpy(u2, https2 ? "https://" : "http://", sizeof u2);
+                        kstrcat(u2, host2, sizeof u2);
+                        if (port2 != (https2 ? 443 : 80)) { char t[8]; kitoa(t, port2); kstrcat(u2, ":", sizeof u2); kstrcat(u2, t, sizeof u2); }
+                        kstrcat(u2, path2, sizeof u2);
+                    } else {
+                        kstrcpy(path2, loc, sizeof path2);
+                        kstrcpy(u2, w_https ? "https://" : "http://", sizeof u2);
+                        kstrcat(u2, job.host, sizeof u2);
+                        if (job.port != (w_https ? 443 : 80)) { char t[8]; kitoa(t, job.port); kstrcat(u2, ":", sizeof u2); kstrcat(u2, t, sizeof u2); }
+                        kstrcat(u2, path2, sizeof u2);
+                    }
+                    lb_reset(); lb_s("redirect ("); lb_i(code); lb_s(") -> "); lb_s(u2); lb_flush(C_WARN);
+                    job_end();                               /* frees the buffer and the socket */
+                    wget_start(u2);
+                    return;                                  /* the new job resolves/opens on its own */
+                }
+                say(C_WARN, "Redirect limit reached (3)."); job_end(); return;
+            }
+            if (code < 0 || code >= 400) {
+                lb_reset(); lb_s("HTTP error "); lb_i(code < 0 ? 0 : code); lb_s(": ");
+                for (int i = 0; i < 60 && hbuf[i] && hbuf[i] != '\n'; i++) { char c = hbuf[i]; if (c == '\r') c = ' '; char t[2] = { c, 0 }; kstrcat(lb, t, LW); }
+                lb_flush(C_ERR); job_end(); return;
+            }
+            w_hdr_done = 1;
+            char hv[40];
+            if (w_hdr_val(he, "Transfer-Encoding", hv, (int)sizeof hv) >= 0 && ci_starts(hv, "chunked")) w_chunked = 1;
+            if (w_hdr_val(he, "Content-Length", hv, (int)sizeof hv) >= 0) { int cl = katoi(hv); job.clen = cl <= 0 ? W_CLEN_UNK : (u32)cl; }
+            else job.clen = W_CLEN_UNK;
+            if (leftover > 0) w_append(tmp + take, leftover);/* body tail of the same read */
+            continue;
+        }
+        /* plain body bytes */
+        w_append(tmp, n);
+        if (w_buflen >= W_MAX) break;                        /* full: stop reading */
+        if (w_buflen - w_prog >= 256 * 1024) {               /* progress messages on big files */
+            w_prog = w_buflen;
+            lb_reset(); lb_s("Received "); lb_i((int)w_buflen); lb_s(" bytes..."); lb_flush(C_DIM);
+        }
+    }
+    /* completion checks */
+    int fin = 0;
+    if (w_https && wssl_ready) {
+        br_ssl_engine_run(&wssl.eng);
+        if (br_ssl_engine_current_state(&wssl.eng) & BR_SSL_CLOSED) fin = 1;
+        if (wssl.eng.hs == TLS_HS_DONE && job.clen != W_CLEN_UNK && w_buflen >= job.clen) fin = 1;
+    } else {
+        if (tcp_eof(job.sock) || (tcp_status(job.sock) != TCP_OPEN && tcp_status(job.sock) != TCP_CONNECTING)) fin = 1;
+        if (job.clen != W_CLEN_UNK && w_buflen >= job.clen) fin = 1;
+    }
+    if (w_buflen >= W_MAX) fin = 1;
+    if (!fin) return;
+    u32 ms = ticks() - job.t0;
+    if (w_chunked) w_unchunk();
+    int trunc = w_buflen >= W_MAX;                           /* hit the 7.5 MB storage cap */
+    w_save_file(trunc, ms);
+    job_end();
+}
+
 void na_tick(void) {
     net_poll();
     switch (job.kind) {
@@ -307,6 +586,7 @@ void na_tick(void) {
         case J_HTTP: http_step(); break;
         case J_SCAN: scan_step(); break;
         case J_UDP: udp_step(); break;
+        case J_WGET: wget_step(); break;
     }
 }
 
@@ -347,6 +627,7 @@ static void help(void) {
         "tcp <host> <port>         test whether a TCP port accepts connections",
         "scan <host> [from-to]     scan common ports, or a range such as 20-100 (max 200)",
         "http <host>[/path]        fetch a page over HTTP and show headers and the start",
+        "wget <url>                download a file over http:// or https:// into /downloads",
         "udp <host> <port> <text>  send a UDP datagram and wait for a reply",
         "ip                        adapter, address, gateway, DNS     arp  neighbour cache",
         "stats                     packet counters                    clear  empty the screen",
@@ -354,7 +635,7 @@ static void help(void) {
         "setip <ip> <mask> [gw] [dns]    configure by hand            setdns <ip>",
         "Ctrl+C stops the running command.  Up/Down recall history.  PgUp/PgDn scroll.",
     };
-    for (u32 i = 0; i < sizeof h / sizeof h[0]; i++) say(i == 11 ? C_DIM : C_TEXT, h[i]);
+    for (u32 i = 0; i < sizeof h / sizeof h[0]; i++) say(i == 12 ? C_DIM : C_TEXT, h[i]);
 }
 static int tokenize(char *s, char **argv, int max) {
     int n = 0;
@@ -440,6 +721,12 @@ static void run_command(char *line) {
         for (int k = 0; host[k]; k++) if (host[k] == ':') { host[k] = 0; port = parse_port(host + k + 1); break; }
         if (!port || !host[0]) { say(C_ERR, "usage: http <host>[:port][/path]"); return; }
         if (job_start(J_HTTP, host)) { job.port = port; kstrcpy(job.path, path, sizeof job.path); }
+    }
+    else if (!strcmp(c, "wget")) {
+        if (n < 2) { say(C_ERR, "usage: wget <url>   e.g. wget http://10.0.2.2/file.bin or wget https://example.com/index.html"); return; }
+        if (!net.present) { net_ready(); return; }
+        w_redirs = 0; w_reset_body();
+        wget_start(a[1]);
     }
     else { lb_reset(); lb_s("Unknown command: "); lb_s(c); lb_s("   (type help)"); lb_flush(C_ERR); }
 }

@@ -4,8 +4,8 @@ CFLAGS  = -m32 -O3 -std=gnu11 -ffreestanding -fno-pie -fno-pic -fno-stack-protec
           -fomit-frame-pointer -DNDEBUG \
           -Wall -Wno-unused-function -Wno-misleading-indentation -Isrc
 LIBGCC  = $(shell $(CC) -m32 -print-libgcc-file-name)
-SRC     = boot.S lib.c arch.c gfx.c svg.c fs.c ui.c apps.c apps2.c taskmgr.c net.c netapp.c fontdata.c \
-          kmalloc.c clip.c png.c zip.c viewer.c paint.c miniz_kt.c miniz_malloc.c \
+SRC     = boot.S lib.c arch.c gfx.c svg.c fs.c fat32.c ui.c apps.c apps2.c taskmgr.c net.c netapp.c fontdata.c \
+          divfallback.c kmalloc.c clip.c png.c zip.c viewer.c paint.c miniz_kt.c miniz_malloc.c \
           vendor/kcompat.c \
           browser.c \
           discord.c \
@@ -22,7 +22,7 @@ build/%.S.o: src/%.S
 	@mkdir -p build
 	$(CC) -m32 -c $< -o $@
 build/kernel.elf: $(OBJ) src/linker.ld
-	ld -m elf_i386 -nostdlib -T src/linker.ld -o $@ $(OBJ) $(LIBGCC)
+	ld -m elf_i386 -z noexecstack -nostdlib -T src/linker.ld -o $@ $(OBJ) $(LIBGCC)
 ktuyome.iso: build/kernel.elf
 	@mkdir -p build/iso/boot/grub
 	cp build/kernel.elf build/iso/boot/ktuyome.elf
@@ -31,6 +31,19 @@ ktuyome.iso: build/kernel.elf
 run: ktuyome.iso
 	@[ -f disk.img ] || qemu-img create -f raw disk.img 64M
 	qemu-system-i386 -m 256 -cdrom ktuyome.iso -hda disk.img -boot d -vga std \
+	  -netdev user,id=net0 \
+	  -device e1000,netdev=net0
+# FAT32 playground: boots with a plain FAT32 volume attached as the second disk (-hdb).
+# Needs the mtools package for fat.img (mformat/mcopy). In Files, press FAT32 to browse it.
+fat.img:
+	@echo "Ktuyome 2.1: copy this file from FAT32 into Files." > fat-sample.txt
+	@echo "Put your own files here before booting (make runfat)." >> fat-sample.txt
+	mformat -C -F -i fat.img -T 131072 ::
+	mcopy -i fat.img fat-sample.txt ::
+	@rm -f fat-sample.txt
+runfat: ktuyome.iso fat.img
+	@[ -f disk.img ] || qemu-img create -f raw disk.img 64M
+	qemu-system-i386 -m 256 -cdrom ktuyome.iso -hda disk.img -hdb fat.img -boot d -vga std \
 	  -netdev user,id=net0 \
 	  -device e1000,netdev=net0
 runnet: ktuyome.iso

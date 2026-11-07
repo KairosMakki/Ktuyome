@@ -105,6 +105,7 @@ static int g_state = ST_HOME, tab, sel[2];
 static Anim sel_anim, tab_anim, open_anim, fade_anim;
 static int cur_app = -1, closing, tile_rc[7][4], tab_rc[2][4];
 static int home_scroll = 0, home_scroll_max = 0, home_scroll_to_sel = 1;
+static int clip_popup = 0, clip_popup_close[4];
 static int arrow_left[4], arrow_right[4], has_left_arrow, has_right_arrow;
 static int open_from[4];
 static int app_opens[APP_COUNT]; static u32 frame_count;
@@ -446,6 +447,33 @@ static void render(void) {
         gfx_text_c(F_MDB, W / 2, H - 120 + 10, toast_msg, 0xFFFFFFFF);
     }
     if (fade_anim.cur > 0) gfx_fill(0, 0, W, H, BLACK_A(fade_anim.cur >> 8));
+    if (clip_popup) {
+        int pw = 420, ph = 300, px = (W - pw) / 2, py = (H - ph) / 2;
+        gfx_shadow(px, py + 8, pw, ph, 18, 16, 140);
+        gfx_rrect(px, py, pw, ph, 18, ARGB(245, 24, 30, 48), ARGB(245, 18, 22, 38), 0);
+        gfx_rrect(px, py, pw, ph, 18, WHITE_A(60), WHITE_A(60), 1);
+        gfx_text(F_MDB, px + 20, py + 18, "Clipboard history", 0xFFFFFFFF);
+        int cbx = px + pw - 40, cby = py + 14;
+        gfx_rrect(cbx, cby, 26, 26, 8, WHITE_A(40), WHITE_A(40), 0);
+        gfx_text_c(F_MDB, cbx + 13, cby + 2, "x", 0xFFFFFFFF);
+        clip_popup_close[0] = cbx; clip_popup_close[1] = cby; clip_popup_close[2] = 26; clip_popup_close[3] = 26;
+        int y = py + 56;
+        int cnt = clip_history_count();
+        if (cnt == 0) gfx_text(F_MD, px + 20, y, "Nothing copied yet.", WHITE_A(150));
+        for (int i = 0; i < cnt; i++) {
+            const char *t = clip_history(i);
+            char preview[64]; int pi = 0;
+            for (int k = 0; t[k] && pi < 60; k++) { if (t[k] == '\n') break; preview[pi++] = t[k]; }
+            preview[pi] = 0;
+            if (!preview[0]) kstrcpy(preview, "(empty)", sizeof preview);
+            gfx_rrect(px + 14, y - 4, pw - 28, 40, 10, WHITE_A(18), WHITE_A(18), 0);
+            gfx_text(F_MD, px + 24, y + 4, preview, 0xFFFFFFFF);
+            char n[12]; kitoa(n, (int)strlen(t));
+            gfx_text_r(F_SM, px + pw - 24, y + 6, n, WHITE_A(120));
+            y += 46;
+        }
+        gfx_text(F_SM, px + 20, py + ph - 28, "Ctrl+. toggles this popup", WHITE_A(120));
+    }
     if (shot) { take_screenshot(); shot_last = ticks(); }
     gfx_blit_pm(cursor_bmp, 28, 28, mouse_x - 4, mouse_y - 3, 255);
     gfx_present(); frame_count++;
@@ -493,6 +521,16 @@ static void handle_event(const Event *e) {
         return;
     }
     if (e->type == EV_DOWN && e->btn == 1) { g_click = 1; g_click_x = e->x; g_click_y = e->y; g_click_mods = e->mods; }
+    if (e->type == EV_KEY && (e->mods & MOD_CTRL) && (e->key == '.' || e->ch == '.')) { clip_popup = !clip_popup; dirty = 1; return; }
+    if (clip_popup) {
+        if (e->type == EV_KEY && e->key == K_ESC) { clip_popup = 0; dirty = 1; return; }
+        if (e->type == EV_DOWN && e->btn == 1) {
+            if (inside(e->x, e->y, clip_popup_close[0], clip_popup_close[1], clip_popup_close[2], clip_popup_close[3])) { clip_popup = 0; g_click = 0; dirty = 1; return; }
+            int cx = (W - 420) / 2, cy = (H - 300) / 2;
+            if (!(e->x >= cx && e->x < cx + 420 && e->y >= cy && e->y < cy + 300)) { clip_popup = 0; dirty = 1; return; }
+        }
+        return;
+    }
     if (g_state == ST_HOME && !closing && cur_app < 0) {
         if (e->type == EV_MOVE) {
             for (int i = 0; i < ntiles[tab]; i++) if (inside(e->x, e->y, tile_rc[i][0], tile_rc[i][1], tile_rc[i][2], tile_rc[i][3]) && sel[tab] != i) {

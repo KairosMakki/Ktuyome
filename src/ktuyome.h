@@ -5,7 +5,7 @@ typedef unsigned short u16; typedef short s16;
 typedef unsigned int u32;  typedef int s32;
 typedef unsigned long long u64;
 #define NULL ((void*)0)
-#define KT_VERSION "1.6"
+#define KT_VERSION "1.7"
 
 /* ---------- lib.c ---------- */
 void *memcpy(void *d, const void *s, u32 n);
@@ -214,6 +214,8 @@ int  clip_set(const char *s, int n);                /* replace the clipboard; re
 void clip_begin(void);  void clip_add(const char *s, int n);   /* build it in pieces */
 int  clip_len(void);  const char *clip_text(void);  /* NUL-terminated */
 int  clip_truncated(void);                          /* last copy did not fit */
+int  clip_history_count(void);
+const char *clip_history(int i);                    /* 0 = most recent */
 void clip_clear(void);
 int  clip_line(char *out, int cap, int *more);      /* first non-blank line, trimmed */
 void clip_notify(const char *verb, int n);          /* toast: "Copied 12 characters" */

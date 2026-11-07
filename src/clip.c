@@ -5,10 +5,13 @@
  * input widgets can show. */
 
 #define CLIP_MAX 32768
+#define CLIP_HIST 5
 static char clip_buf[CLIP_MAX + 1];
 static int clip_n, clip_cut;
+static char clip_hist[CLIP_HIST][CLIP_MAX + 1];
+static int clip_hist_n;
 
-u32 clip_static_bytes(void) { return (u32)sizeof clip_buf; }
+u32 clip_static_bytes(void) { return (u32)(sizeof clip_buf + sizeof clip_hist); }
 
 static void put(char c) { if (clip_n >= CLIP_MAX) { clip_cut = 1; return; } clip_buf[clip_n++] = c; clip_buf[clip_n] = 0; }
 
@@ -22,7 +25,14 @@ void clip_add(const char *s, int n) {
         else if (c >= 32 && c < 127) put((char)c);
     }
 }
-int clip_set(const char *s, int n) { clip_begin(); clip_add(s, n); return clip_n; }
+static void clip_push_history(void) {
+    if (clip_n <= 0) return;
+    /* shift */
+    for (int i = CLIP_HIST - 1; i > 0; i--) memcpy(clip_hist[i], clip_hist[i-1], CLIP_MAX + 1);
+    memcpy(clip_hist[0], clip_buf, CLIP_MAX + 1);
+    if (clip_hist_n < CLIP_HIST) clip_hist_n++;
+}
+int clip_set(const char *s, int n) { clip_begin(); clip_add(s, n); clip_push_history(); return clip_n; }
 int clip_len(void) { return clip_n; }
 const char *clip_text(void) { return clip_buf; }
 int clip_truncated(void) { return clip_cut; }
@@ -65,4 +75,10 @@ void clip_notify(const char *verb, int n) {
     kitoa(num, n); kstrcat(t, num, sizeof t); kstrcat(t, n == 1 ? " character" : " characters", sizeof t);
     if (clip_cut) kstrcat(t, " (clipboard full)", sizeof t);
     ui_flash(t);
+}
+
+int clip_history_count(void) { return clip_hist_n; }
+const char *clip_history(int i) {
+    if (i < 0 || i >= clip_hist_n) return "";
+    return clip_hist[i];
 }

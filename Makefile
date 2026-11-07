@@ -5,7 +5,7 @@ CFLAGS  = -m32 -O3 -std=gnu11 -ffreestanding -fno-pie -fno-pic -fno-stack-protec
           -Wall -Wno-unused-function -Wno-misleading-indentation -Isrc
 LIBGCC  = $(shell $(CC) -m32 -print-libgcc-file-name)
 SRC     = boot.S lib.c arch.c gfx.c svg.c fs.c ui.c apps.c apps2.c taskmgr.c net.c netapp.c fontdata.c \
-          kmalloc.c clip.c png.c zip.c miniz_kt.c miniz_malloc.c \
+          kmalloc.c clip.c png.c zip.c viewer.c paint.c miniz_kt.c miniz_malloc.c \
           vendor/kcompat.c \
           browser.c \
           discord.c \

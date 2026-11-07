@@ -5,7 +5,7 @@ typedef unsigned short u16; typedef short s16;
 typedef unsigned int u32;  typedef int s32;
 typedef unsigned long long u64;
 #define NULL ((void*)0)
-#define KT_VERSION "1.9"
+#define KT_VERSION "2.0"
 
 /* ---------- lib.c ---------- */
 void *memcpy(void *d, const void *s, u32 n);
@@ -152,8 +152,8 @@ typedef struct {
     int  (*key)(const Event *e);                 /* return 1 if consumed */
     void (*draw)(int x, int y, int w, int h);
 } App;
-enum { APP_NOTES, APP_EDITOR, APP_CALC, APP_FILES, APP_SETTINGS, APP_TASKMGR, APP_NETWORK, APP_BROWSER, APP_DISCORD, APP_ZIP, APP_COUNT };
-enum { IC_NOTES, IC_EDITOR, IC_CALC, IC_FILES, IC_SETTINGS, IC_ABOUT, IC_RESTART, IC_POWER, IC_TASKMGR, IC_NETWORK, IC_BROWSER, IC_DISCORD, IC_ZIP, IC_COUNT };
+enum { APP_NOTES, APP_EDITOR, APP_CALC, APP_FILES, APP_SETTINGS, APP_TASKMGR, APP_NETWORK, APP_BROWSER, APP_DISCORD, APP_ZIP, APP_VIEWER, APP_PAINT, APP_COUNT };
+enum { IC_NOTES, IC_EDITOR, IC_CALC, IC_FILES, IC_SETTINGS, IC_ABOUT, IC_RESTART, IC_POWER, IC_TASKMGR, IC_NETWORK, IC_BROWSER, IC_DISCORD, IC_ZIP, IC_VIEWER, IC_PAINT, IC_COUNT };
 extern int g_click, g_click_x, g_click_y, g_click_mods, g_wheel;
 extern int g_blink;
 void ui_open_app(int app);
@@ -286,6 +286,18 @@ void zip_open(void); void zip_close(void);
 int  zip_key(const Event *e);
 void zip_draw(int x, int y, int w, int h);
 u32  zip_static_bytes(void);
+
+/* ---------- viewer.c : Image viewer ---------- */
+void viewer_open(void); void viewer_close(void);
+int  viewer_key(const Event *e);
+void viewer_draw(int x, int y, int w, int h);
+u32  viewer_static_bytes(void);
+
+/* ---------- paint.c : Paint ---------- */
+void paint_open(void); void paint_close(void);
+int  paint_key(const Event *e);
+void paint_draw(int x, int y, int w, int h);
+u32  paint_static_bytes(void);
 
 /* ---------- kmalloc.c : kernel heap ---------- */
 void *kmalloc(u32 n);

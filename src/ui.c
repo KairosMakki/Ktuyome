@@ -82,14 +82,16 @@ void ui_icon(int icon, int x, int y, int size, int alpha) {
 /* ============================== state ============================== */
 enum { ST_HOME, ST_APP };
 typedef struct { const char *name, *sub; int icon; u32 c1, c2; int kind, arg; } Tile;
-static const Tile tiles[2][7] = {
+static const Tile tiles[2][9] = {
     { { "Notes", "Capture ideas. Saved automatically.", IC_NOTES, 0xFFFFB74D, 0xFFFF7043, 0, APP_NOTES },
       { "Text Editor", "Write and edit any file. Previews SVG.", IC_EDITOR, 0xFF4FC3F7, 0xFF3D5AFE, 0, APP_EDITOR },
       { "Calculator", "Quick arithmetic with a scientific column.", IC_CALC, 0xFF4DD0A1, 0xFF00897B, 0, APP_CALC },
       { "Files", "Browse, create and preview your files.", IC_FILES, 0xFFB388FF, 0xFF7C4DFF, 0, APP_FILES },
       { "Task Manager", "Live CPU, memory and storage monitor.", IC_TASKMGR, 0xFFF48FB1, 0xFFD81B60, 0, APP_TASKMGR },
       { "Network", "Ping, traceroute, DNS, ports and HTTP.", IC_NETWORK, 0xFF9FA8DA, 0xFF3949AB, 0, APP_NETWORK },
-      { "Zip", "Create and extract zip archives.", IC_ZIP, 0xFF9CE29B, 0xFF388E3C, 0, APP_ZIP } },
+      { "Zip", "Create and extract zip archives.", IC_ZIP, 0xFF9CE29B, 0xFF388E3C, 0, APP_ZIP },
+      { "Image Viewer", "View PNG images with pan and zoom.", IC_VIEWER, 0xFF64B5F6, 0xFF1565C0, 0, APP_VIEWER },
+      { "Paint", "Draw and export PNG images.", IC_PAINT, 0xFFFF8A80, 0xFFD32F2F, 0, APP_PAINT } },
     { { "Settings", "Display, input, date and time, storage.", IC_SETTINGS, 0xFF90A4AE, 0xFF546E7A, 0, APP_SETTINGS },
       { "Browser", "Text-mode web browser, HTTP and HTTPS.", IC_BROWSER, 0xFF64B5F6, 0xFF1565C0, 0, APP_BROWSER },
       { "Discord", "Chat client with WebSocket Gateway.", IC_DISCORD, 0xFF7986CB, 0xFF5865F2, 0, APP_DISCORD },
@@ -99,11 +101,11 @@ static const Tile tiles[2][7] = {
       { "Zip", "Create and extract zip archives.", IC_ZIP, 0xFF9CE29B, 0xFF388E3C, 0, APP_ZIP } },
 };
 static const char *tab_names[2] = { "Apps", "System" };
-static const int ntiles[2] = { 7, 6 };
+static const int ntiles[2] = { 9, 6 };
 
 static int g_state = ST_HOME, tab, sel[2];
 static Anim sel_anim, tab_anim, open_anim, fade_anim;
-static int cur_app = -1, closing, tile_rc[7][4], tab_rc[2][4];
+static int cur_app = -1, closing, tile_rc[9][4], tab_rc[2][4];
 static int home_scroll = 0, home_scroll_max = 0, home_scroll_to_sel = 1;
 static int clip_popup = 0, clip_popup_close[4];
 static int arrow_left[4], arrow_right[4], has_left_arrow, has_right_arrow;
@@ -285,7 +287,7 @@ static void draw_home(void) {
     gfx_text_r(F_MDB, axr - 58, 34, clk, 0xFFFFFFFF);
 
     /* tiles */
-    int sizes[7], pos[7], total = 0;
+    int sizes[9], pos[9], total = 0;
     for (int i = 0; i < nt; i++) {
         int foc = iclamp(65536 - iabs(i * 65536 - selpos), 0, 65536) >> 8;
         sizes[i] = base + (extra * foc >> 8);

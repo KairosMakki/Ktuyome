@@ -1,7 +1,7 @@
 #include "ktuyome.h"
 
 /* ============================== icon artwork (plain SVG, stored in /system/icons) ============================== */
-const char *icon_names[IC_COUNT] = { "notes", "editor", "calculator", "files", "settings", "about", "restart", "power", "taskmgr", "network", "browser", "discord", "zip" };
+const char *icon_names[IC_COUNT] = { "notes", "editor", "calculator", "files", "settings", "about", "restart", "power", "taskmgr", "network", "browser", "discord", "zip", "viewer", "paint" };
 const char *icon_svgs[IC_COUNT] = {
     "<svg viewBox='0 0 24 24'><path d='M6 2.8h8.6L20 8.2V19a2.2 2.2 0 0 1-2.2 2.2H6A2.2 2.2 0 0 1 3.8 19V5A2.2 2.2 0 0 1 6 2.8z' fill='#fff'/>"
     "<path d='M14.4 2.8V7a1.2 1.2 0 0 0 1.2 1.2H20z' fill='#FFC8B5'/>"
@@ -70,6 +70,12 @@ const char *icon_svgs[IC_COUNT] = {
     "<path d='M2.8 6.2A2.2 2.2 0 0 1 5 4h4.4c.6 0 1.1.25 1.5.65L12.2 6H19a2.2 2.2 0 0 1 2.2 2.2v9.6A2.2 2.2 0 0 1 19 20H5a2.2 2.2 0 0 1-2.2-2.2z' fill='#fff'/>"
     "<path d='M12 8v10' stroke='#7C4DFF' stroke-width='1.6' stroke-linecap='round' fill='none'/>"
     "<circle cx='12' cy='9' r='1.2' fill='#7C4DFF'/><circle cx='12' cy='12' r='1.2' fill='#7C4DFF'/><circle cx='12' cy='15' r='1.2' fill='#7C4DFF'/></svg>",
+
+    /* IC_VIEWER */
+    "<svg viewBox='0 0 24 24'><rect x='3' y='4' width='18' height='14' rx='2' fill='#fff'/><circle cx='9' cy='9' r='2' fill='#1565C0'/><path d='M3 15l5-4 4 3 5-5 5 4v3H3z' fill='#1565C0'/></svg>",
+
+    /* IC_PAINT */
+    "<svg viewBox='0 0 24 24'><path d='M12 3C7 3 3 7 3 12s4 9 9 9 9-4 9-9-4-9-9-9z' fill='#fff'/><circle cx='8' cy='9' r='1.6' fill='#FF7043'/><circle cx='12' cy='7' r='1.6' fill='#4FC3F7'/><circle cx='16' cy='9' r='1.6' fill='#4DD0A1'/><path d='M12 12l6 6' stroke='#7C4DFF' stroke-width='2' stroke-linecap='round'/></svg>",
 };
 const char *sample_svg =
     "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 120'>\n"
@@ -95,6 +101,8 @@ void files_dialog(int action, int arg);
 void set_open(void); void set_close(void); int set_key(const Event *e); void set_draw(int x, int y, int w, int h);
 void set_tick(void);
 void zip_open(void); void zip_close(void); int zip_key(const Event *e); void zip_draw(int x, int y, int w, int h);
+void viewer_open(void); void viewer_close(void); int viewer_key(const Event *e); void viewer_draw(int x, int y, int w, int h);
+void paint_open(void); void paint_close(void); int paint_key(const Event *e); void paint_draw(int x, int y, int w, int h);
 /* ============================== multi-line text widget ============================== */
 void tb_init(TextBuf *t, char *buf, int cap, int font) { memset(t, 0, sizeof *t); t->buf = buf; t->cap = cap; t->font = font; t->sel = -1; buf[0] = 0; }
 void tb_set(TextBuf *t, const char *s, int len) {
@@ -721,6 +729,8 @@ void apps_init(void) {
     apps[APP_BROWSER]  = (App){ "Browser", IC_BROWSER, browser_open, browser_close, browser_key, browser_draw };
     apps[APP_DISCORD]   = (App){ "Discord", IC_DISCORD, discord_open, discord_close, discord_key, discord_draw };
     apps[APP_ZIP]       = (App){ "Zip", IC_ZIP, zip_open, zip_close, zip_key, zip_draw };
+    apps[APP_VIEWER]    = (App){ "Image Viewer", IC_VIEWER, viewer_open, viewer_close, viewer_key, viewer_draw };
+    apps[APP_PAINT]     = (App){ "Paint", IC_PAINT, paint_open, paint_close, paint_key, paint_draw };
 }
 u32 app_static_bytes(int app) {
     switch (app) {
@@ -732,6 +742,8 @@ u32 app_static_bytes(int app) {
         case APP_BROWSER: return browser_static_bytes();
         case APP_DISCORD: return discord_static_bytes();
         case APP_ZIP:    return zip_static_bytes();
+        case APP_VIEWER: return viewer_static_bytes();
+        case APP_PAINT:  return paint_static_bytes();
         case APP_FILES:  return files_static_bytes();
         default:         return 0;
     }

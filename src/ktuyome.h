@@ -34,6 +34,11 @@ static inline void outb(u16 p, u8 v) { __asm__ volatile("outb %0,%1" :: "a"(v), 
 static inline u8 inb(u16 p) { u8 v; __asm__ volatile("inb %1,%0" : "=a"(v) : "Nd"(p)); return v; }
 static inline void outw(u16 p, u16 v) { __asm__ volatile("outw %0,%1" :: "a"(v), "Nd"(p)); }
 static inline u16 inw(u16 p) { u16 v; __asm__ volatile("inw %1,%0" : "=a"(v) : "Nd"(p)); return v; }
+static inline void outl(u16 p, u32 v) { __asm__ volatile("outl %0,%1" :: "a"(v), "Nd"(p)); }
+static inline u32 inl(u16 p) { u32 v; __asm__ volatile("inl %1,%0" : "=a"(v) : "Nd"(p)); return v; }
+static inline u32 mmio_rd32(void *a) { u32 volatile *p = (u32 volatile *)a; return *p; }
+static inline void mmio_wr32(void *a, u32 v) { u32 volatile *p = (u32 volatile *)a; *p = v; }
+static inline void mmio_wait(void) { __asm__ volatile("" ::: "memory"); }
 
 void arch_init(void);
 u32  ticks(void);                         /* milliseconds since boot */
@@ -59,6 +64,13 @@ int  disk_present(void);
 u32  disk_sectors(void);
 int  disk_read(u32 lba, void *buf, int nsec);
 int  disk_write(u32 lba, const void *buf, int nsec);
+int  disk_is_ahci(void);                  /* 1 when the SATA disk runs through AHCI, 0 = legacy ATA */
+void pci_scan(void);                      /* PCI enumeration (fills pci_info / ahci_info) */
+typedef struct { u16 vendor, device; u8 bus, dev, fn, cls[3]; } PciDev;
+extern PciDev pci_info[16]; extern int pci_count;
+typedef struct { int found; u8 bus, dev, fn; u32 bar; } AhciInfo;
+extern AhciInfo ahci_info;
+void dbg_init(void); void dbg_puts(const char *s);   /* COM1 serial console (test/QEMU output) */
 
 /* ---------- gfx.c ---------- */
 #define ARGB(a,r,g,b) (((u32)(a)<<24)|((u32)(r)<<16)|((u32)(g)<<8)|(u32)(b))

@@ -225,7 +225,256 @@ const char *cpu_brand(void) {
 static u32 g_mem_kb;
 u32 mem_total_kb(void) { return g_mem_kb; }
 
-/* ============================ ATA PIO (primary master) ============================ */
+/* ============================ serial console (COM1, test/debug) ============================ */
+void dbg_init(void) {
+    outb(0x3F8 + 1, 0x00);                 /* disable interrupts */
+    outb(0x3F8 + 3, 0x80);                 /* DLAB on */
+    outb(0x3F8 + 0, 0x02);                 /* 38400 baud... fine for tests */
+    outb(0x3F8 + 1, 0x00);
+    outb(0x3F8 + 3, 0x03);                 /* 8N1 */
+    outb(0x3F8 + 2, 0xC7);                 /* FIFO clear+enable */
+    outb(0x3F8 + 4, 0x0B);                 /* DTR/RTS/OUT2 */
+}
+void dbg_puts(const char *s) {
+    for (u32 i = 0; s && s[i]; i++) {
+        for (int t = 0; t < 20000 && !(inb(0x3F8 + 5) & 0x20); t++) ;
+        outb(0x3F8 + 0, s[i]);
+    }
+}
+
+/* ============================ PCI config space ============================ */
+PciDev pci_info[16]; int pci_count;
+static u32 pci_cfg_read(u8 bus, u8 dev, u8 fn, u8 off) {
+    outl(0xCF8, 0x80000000u | ((u32)bus << 16) | ((u32)dev << 11) | ((u32)fn << 8) | (off & 0xFC));
+    return inl(0xCFC);
+}
+static void pci_cfg_write(u8 bus, u8 dev, u8 fn, u8 off, u32 v) {
+    outl(0xCF8, 0x80000000u | ((u32)bus << 16) | ((u32)dev << 11) | ((u32)fn << 8) | (off & 0xFC));
+    outl(0xCFC, v);
+}
+static void pci_add(u8 bus, u8 dev, u8 fn) {
+    if (pci_count >= 16) return;
+    u32 id0 = pci_cfg_read(bus, dev, fn, 0x00);
+    u32 id2 = pci_cfg_read(bus, dev, fn, 0x08);
+    PciDev *d = &pci_info[pci_count];
+    d->vendor = id0 & 0xFFFF; d->device = id0 >> 16;
+    d->bus = bus; d->dev = dev; d->fn = fn;
+    d->cls[0] = (u8)(id2 >> 24); d->cls[1] = (u8)(id2 >> 16); d->cls[2] = (u8)(id2 >> 8);
+    pci_count++;
+}
+void pci_scan(void) {
+    pci_count = 0;
+    for (int bus = 0; bus < 256; bus++)
+        for (int dev = 0; dev < 32; dev++) {
+            u32 id = pci_cfg_read(bus, dev, 0, 0x00);
+            if ((u16)id == 0xFFFF) continue;
+            pci_add(bus, dev, 0);
+            u32 hdr = pci_cfg_read(bus, dev, 0, 0x0C);
+            int multi = (hdr >> 16) & 0x80;
+            for (int fn = 1; multi && fn < 8; fn++) {
+                if ((u16)pci_cfg_read(bus, dev, fn, 0x00) != 0xFFFF) pci_add(bus, dev, fn);
+            }
+        }
+}
+
+AhciInfo ahci_info;
+
+/* ============================ AHCI (SATA) driver ============================
+ * Polled (no interrupts): the PIC mask stays untouched, so reboot/legacy
+ * behaviour is unchanged. In this kernel physical = linear (no paging), so
+ * PCI MMIO BARs are directly usable.
+ *
+ * Command list entry (AHCI spec / QEMU AHCICmdHdr, 32 bytes):
+ *   +0x00 u32 opts:   bits 0-4 CFL (FIS length/4), bit 6 W, bits 16-31 PRDTL
+ *   +0x04 u32 status: PRDBC bytes transferred (written by controller)
+ *   +0x08 u64:        command table base address
+ * Command table: CFIS 64B, ACMD 16B, rsvd 48B, PRDT from +0x80. */
+/* PRDT entry: u64 base address (DBA+DBAU), u32 reserved, u32 bits 0-21 = byte count - 1, bit31 IOC. */
+typedef struct __attribute__((packed)) { u32 dba, dbau, rsv, dw3; } Prd;
+typedef struct __attribute__((packed)) { u8 cfis[64]; u8 acmd[16]; u8 rsv[48]; Prd prdt[16]; } CmdTable;
+typedef struct __attribute__((packed)) { u32 opts; u32 status; u32 addr0, addr1; u32 rsv[4]; } CmdList;
+
+static volatile u8 *ab;
+static int ahci_ok; static u32 ahci_secs;
+static volatile u32 *hp;                  /* port registers of the disk port */
+static CmdList   ahci_cl  __attribute__((aligned(1024)));
+static u8        ahci_fb[256] __attribute__((aligned(256)));
+static CmdTable  ahci_ct  __attribute__((aligned(128)));
+
+static const char hxk[] = "0123456789abcdef";
+const char *hex8(u32 v) {
+    static char buf[11]; buf[0] = '0'; buf[1] = 'x';
+    for (int i = 0; i < 8; i++) buf[2 + i] = hxk[(v >> (28 - 4 * i)) & 15];
+    buf[10] = 0; return buf;
+}
+const char *hex4(u32 v) {
+    static char buf[7]; buf[0] = '0'; buf[1] = 'x';
+    for (int i = 0; i < 4; i++) buf[2 + i] = hxk[(v >> (12 - 4 * i)) & 15];
+    buf[6] = 0; return buf;
+}
+
+static u32 ahci_cap(void) { return mmio_rd32(ab + 0x00); }
+static u32 ahci_pi(void)  { return mmio_rd32(ab + 0x0C); }
+
+static void iosleep(int ms) { u32 end = ticks() + (u32)ms; while (ticks() < end) __asm__ volatile("pause" ::: "memory"); }
+
+/* Compiler fence: the DMA structures (ahci_cl/ahci_ct/buffers) are plain
+ * memory - without this GCC may sink their stores past the volatile MMIO
+ * PxCI write, so the HBA would submit a stale/empty command. */
+static inline void kfence(void) { __asm__ volatile("" ::: "memory"); }
+
+static void p_stop(volatile u32 *p) {          /* px.CMD: ST|FRE off, wait CR/FR clear */
+    mmio_wr32(&p[6], mmio_rd32(&p[6]) & ~(0x1u | 0x10u));
+    int t;
+    for (t = 0; t < 500 && (mmio_rd32(&p[6]) & 0x8000u); t++) iosleep(1);   /* CR */
+    for (t = 0; t < 500 && (mmio_rd32(&p[6]) & 0x4000u); t++) iosleep(1);   /* FR */
+}
+static void p_spinup(volatile u32 *p) {        /* after CLB/FB wired: spin up + start engine */
+    mmio_wr32(&p[6], 0x16u);                   /* FRE | POD | SUD */
+    for (int t = 0; t < 2000; t++) {
+        u32 tfd = mmio_rd32(&p[8]);            /* px.TFD (0x20) */
+        if (!(tfd & 0x88u)) break;             /* BSY + DRQ clear */
+        iosleep(1);
+    }
+    mmio_wr32(&p[6], 0x17u);                   /* + ST: command engine running */
+    for (int t = 0; t < 500 && !(mmio_rd32(&p[6]) & 0x8000u); t++) iosleep(1);
+}
+
+/* ---- wait for a submitted command slot to clear; 0 = ok ---- */
+static int ahci_wait_slot(volatile u32 *p, const char *what) {
+    int done = 0;
+    for (int t = 0; t < 8000; t++) {           /* ~8 s timeout */
+        if (!(mmio_rd32(&p[14]) & 1u)) { done = 1; break; }
+        iosleep(1);
+    }
+    u32 tfd = mmio_rd32(&p[8]);                /* px.TFD */
+    if (!done || (tfd & 0x1u)) {
+        dbg_puts("AHCI: "); dbg_puts(what);
+        dbg_puts(" failed tfd="); dbg_puts(hex8(tfd));
+        dbg_puts(" ci="); dbg_puts(hex8(mmio_rd32(&p[14]))); dbg_puts("\n");
+        return -1;
+    }
+    return 0;
+}
+
+/* ---- IDENTIFY DEVICE over AHCI (PIO-in via the PRD) ---- */
+static u32 ahci_identify(volatile u32 *p, u16 *idbuf) {
+    u8 *cfis = ahci_ct.cfis;
+    for (int i = 0; i < 64; i++) cfis[i] = 0;
+    cfis[0] = 0x27; cfis[1] = 0x80;
+    cfis[2] = 0xEC;                            /* IDENTIFY DEVICE */
+    cfis[7] = 0xE0;                            /* device: DEV 0, LBA mode */
+    ahci_cl.addr0 = (u32)&ahci_ct;             /* command table pointer */
+    ahci_cl.addr1 = 0;
+    ahci_cl.opts = 0x5 | (1u << 16);           /* CFL 5, 1 PRD, read */
+    ahci_cl.status = 0;
+    ahci_ct.prdt[0].dba = (u32)idbuf; ahci_ct.prdt[0].dbau = 0;
+    ahci_ct.prdt[0].rsv = 0;
+    ahci_ct.prdt[0].dw3 = 512 - 1;
+    mmio_wr32(&p[4], 0);                       /* px.IS clear */
+    kfence();
+    mmio_wr32(&p[14], 1);                      /* px.CI slot 0 */
+    if (ahci_wait_slot(p, "identify")) {
+        kfence();
+        return 0;
+    }
+    kfence();
+    /* a real IDENTIFY starts with "0x80" + a serial number; sanity checks */
+    if (idbuf[0] == 0xFFFF || !idbuf[0]) { dbg_puts("AHCI: identify: bad idblock\n"); return 0; }
+    dbg_puts("AHCI: identify ok, sectors=");
+    u32 secs = (u32)idbuf[60] | ((u32)idbuf[61] << 16);
+    char t[16]; kitoa(t, (int)secs); dbg_puts(t); dbg_puts("\n");
+    return secs;
+}
+
+static int ahci_port_scan(void) {
+    int npc = (ahci_cap() & 0x1F) + 1;
+    u32 pi = ahci_pi();
+    dbg_puts("AHCI: ports impl="); dbg_puts(hex8(pi)); dbg_puts(" npc="); char n[4]; kitoa(n, npc); dbg_puts(n); dbg_puts("\n");
+    for (int i = 0; i < npc && i < 32; i++) {
+        if (!(pi & (1u << i))) continue;
+        volatile u32 *p = (volatile u32 *)(ab + 0x100 + i * 0x80);
+        u32 det = mmio_rd32(&p[10]) & 0xF;     /* px.SSTS (0x28) */
+        if (det == 0) continue;                /* no device on this port */
+        p_stop(p);
+        mmio_wr32(&p[0], (u32)&ahci_cl);       /* px.CLB  */
+        mmio_wr32(&p[1], 0);                   /* px.CLBU */
+        mmio_wr32(&p[2], (u32)&ahci_fb);       /* px.FB   */
+        mmio_wr32(&p[3], 0);                   /* px.FBU  */
+        mmio_wr32(&p[12], 0);                  /* px.SERR */
+        mmio_wr32(&p[4], 0);                   /* px.IS   */
+        /* COMRESET: SCTL.DET = 1 for a few ms, then 0 */
+        mmio_wr32(&p[11], 0x1);                /* px.SCTL (0x2C) */
+        iosleep(2);
+        mmio_wr32(&p[11], 0x0);
+        iosleep(20);
+        p_spinup(p);
+        u16 idbuf[256];
+        u32 secs = ahci_identify(p, idbuf);
+        if (secs > 64) {
+            hp = p;
+            ahci_secs = secs;
+            dbg_puts("AHCI: SATA disk on port "); kitoa(n, i); dbg_puts(n); dbg_puts("\n");
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void ahci_init(void) {
+    ahci_ok = 0; hp = NULL; ahci_secs = 0; ab = NULL;
+    dbg_puts("AHCI: scan\n");
+    if (!ahci_info.found) { dbg_puts("AHCI: no controller\n"); return; }
+    if (ahci_info.bar & 1) { dbg_puts("AHCI: I/O BAR unsupported\n"); return; }
+    ab = (volatile u8 *)(u32)(ahci_info.bar & 0xFFFFFFF0u);
+    /* reset the HBA, then enable AHCI */
+    mmio_wr32(ab + 0x04, mmio_rd32(ab + 0x04) | 0x1u);          /* GHC.HR */
+    for (int t = 0; t < 100 && (mmio_rd32(ab + 0x04) & 0x1u); t++) iosleep(1);
+    mmio_wr32(ab + 0x04, mmio_rd32(ab + 0x04) | 0x80000000u);   /* GHC.AE */
+    if (!ahci_port_scan()) { dbg_puts("AHCI: no SATA disk\n"); return; }
+    dbg_puts("AHCI: disk ready, sectors="); char t[16]; kitoa(t, (int)ahci_secs); dbg_puts(t); dbg_puts("\n");
+    ahci_ok = 1;
+}
+
+/* ---- one polled DMA transfer ---- */
+static int ahci_issue(u32 lba, void *buf, int nsec, int write) {
+    if (!ahci_ok || !hp || !buf) return 0;
+    u8 *pb = (u8 *)buf;
+    int left = nsec;
+    volatile u32 *p = hp;
+    while (left > 0) {
+        int n = left > 8 ? 8 : left;           /* 8 sectors = one 4 KiB PRD */
+        u8 *cfis = ahci_ct.cfis;
+        for (int i = 0; i < 64; i++) cfis[i] = 0;
+        cfis[0] = 0x27;                        /* host-to-device */
+        cfis[1] = 0x80;                        /* C bit (update command) */
+        cfis[2] = write ? 0x35 : 0x25;         /* WRITE/READ DMA EXT */
+        cfis[4] = (u8)lba;                     /* LBA 7:0   */
+        cfis[5] = (u8)(lba >> 8);              /* LBA 15:8  */
+        cfis[6] = (u8)(lba >> 16);             /* LBA 23:16 */
+        cfis[7] = 0xE0;                        /* device: DEV 0, LBA mode */
+        cfis[8] = (u8)(lba >> 24);             /* LBA 31:24 (HOB low)     */
+        cfis[9] = 0; cfis[10] = 0;             /* LBA 47:32 (unused here) */
+        cfis[12] = (u8)n; cfis[13] = 0;        /* sector count */
+        ahci_cl.opts = (write ? 0x40u : 0) | 0x5 | (1u << 16);
+        ahci_cl.status = 0;
+        ahci_cl.addr0 = (u32)&ahci_ct;
+        ahci_cl.addr1 = 0;
+        ahci_ct.prdt[0].dba = (u32)pb; ahci_ct.prdt[0].dbau = 0;
+        ahci_ct.prdt[0].rsv = 0;
+        ahci_ct.prdt[0].dw3 = (u32)(n * 512 - 1);   /* IOC off */
+        mmio_wr32(&p[4], 0);                   /* px.IS clear */
+        kfence();
+        mmio_wr32(&p[14], 1);                  /* px.CI: issue slot 0 */
+        if (ahci_wait_slot(p, write ? "write" : "read")) {
+            p_stop(p); p_spinup(p);
+            return 0;
+        }
+        kfence();                              /* make the DMA result visible */
+        pb += n * 512; lba += n; left -= n;
+    }
+    return 1;
+}
 static int ata_ok; static u32 ata_secs;
 static int ata_wait(int drq) {
     for (int i = 0; i < 400000; i++) {
@@ -248,14 +497,73 @@ static void ata_init(void) {
     ata_secs = id[60] | ((u32)id[61] << 16);
     ata_ok = ata_secs > 64;
 }
-int disk_present(void) { return ata_ok; }
-u32 disk_sectors(void) { return ata_secs; }
+int disk_present(void) { return ahci_ok || ata_ok; }
+u32 disk_sectors(void) { return ahci_ok ? ahci_secs : ata_secs; }
+int disk_is_ahci(void) { return ahci_ok; }
+
+/* ---- storage bring-up: PCI scan, AHCI if present, else legacy ATA PIO ---- */
+static int find_ahci_controller(void) {
+    for (int i = 0; i < pci_count; i++) {
+        PciDev *d = &pci_info[i];
+        if (d->cls[0] != 0x01 || d->cls[1] != 0x06) continue;      /* mass storage / SATA */
+        ahci_info.bus = d->bus; ahci_info.dev = d->dev; ahci_info.fn = d->fn;
+        if (d->cls[2] == 0x01 || d->cls[2] == 0x02) {             /* AHCI / AHCI rev1.5 prog-if, or vendor-specific */
+            u32 bar = pci_cfg_read(d->bus, d->dev, d->fn, 0x24);  /* BAR5 */
+            if (bar == 0 || (bar & 1)) continue;                  /* no usable MMIO BAR */
+            ahci_info.found = 1; ahci_info.bar = bar;
+            u32 cmd = pci_cfg_read(d->bus, d->dev, d->fn, 0x04);  /* enable memory decode + bus master */
+            pci_cfg_write(d->bus, d->dev, d->fn, 0x04, (cmd | 0x2 | 0x4) & ~0x400u);
+            dbg_puts("AHCI: controller "); dbg_puts(hex4(d->vendor)); dbg_puts(":");
+            dbg_puts(hex4(d->device));
+            dbg_puts(" bus="); char t[8]; kitoa(t, d->bus); dbg_puts(t);
+            dbg_puts(" bar="); dbg_puts(hex8(bar)); dbg_puts("\n");
+            return 1;
+        }
+        dbg_puts("AHCI: SATA controller found but prog-if not AHCI (prog-if="); dbg_puts(hex8((u32)d->cls[2])); dbg_puts(")\n");
+    }
+    return 0;
+}
+
+static void disk_selftest(void) {                       /* serial-log verification harness */
+    static u8 s0[512], s1[512], scratch[512], keep[512];
+    if (!disk_present() || !disk_read(0, s0, 1)) { dbg_puts("SELFTEST: read fail\n"); return; }
+    if (!disk_read(0, s1, 1) || memcmp(s0, s1, 512)) { dbg_puts("SELFTEST: double-read mismatch\n"); return; }
+    u32 h = 0x811C9DC5u;                                 /* FNV-1a of sector 0 */
+    for (int i = 0; i < 512; i++) { h ^= s0[i]; h *= 0x01000193u; }
+    dbg_puts("S0HASH="); dbg_puts(hex8(h)); dbg_puts("\n");
+    dbg_puts("READOK\n");
+    if (((u32 *)s0)[0] == 0x3153544Bu) { dbg_puts("WRITE-TEST: skipped (KTFS disk)\n"); return; }
+    u32 last = disk_sectors() - 1;                       /* scratch on the last sector */
+    if (!disk_read(last, keep, 1)) { dbg_puts("SELFTEST: keep read fail\n"); return; }
+    kstrcpy((char *)scratch, "KTAHCI-TEST", (int)sizeof scratch); scratch[15] = 0;
+    for (int i = 16; i < 512; i++) scratch[i] = (u8)(i * 37 + 0x5A);
+    if (!disk_write(last, scratch, 1)) { dbg_puts("WRITE-TEST: write fail\n"); return; }
+    dbg_puts("WRITEOK\n");
+    static u8 rb[512];
+    if (!disk_read(last, rb, 1)) { dbg_puts("WRITE-TEST: readback fail\n"); return; }
+    if (memcmp(rb, scratch, 512)) { dbg_puts("WRITE-TEST: data mismatch\n"); return; }
+    dbg_puts("WRITECMP-OK\n");
+    if (!disk_write(last, keep, 1) || !disk_read(last, rb, 1) || memcmp(rb, keep, 512)) { dbg_puts("RESTORE-FAIL\n"); return; }
+    dbg_puts("RESTORED\n");
+}
+
+static void storage_init(void) {
+    dbg_puts("KTUYOME: storage init\n");
+    pci_scan();
+    dbg_puts("PCI: "); char t[8]; kitoa(t, pci_count); dbg_puts(t); dbg_puts(" devices\n");
+    if (find_ahci_controller()) ahci_init();
+    if (!ahci_ok) ata_init();
+    if (ahci_ok) dbg_puts("DISK: ahci\n"); else if (ata_ok) dbg_puts("DISK: ata-pio\n"); else dbg_puts("DISK: none\n");
+    disk_selftest();
+}
+
+/* ============================ power ============================ */
 static void ata_setup(u32 lba, int n, u8 cmd) {
     outb(0x1F6, 0xE0 | ((lba >> 24) & 0x0F));
     outb(0x1F2, (u8)n); outb(0x1F3, lba); outb(0x1F4, lba >> 8); outb(0x1F5, lba >> 16);
     outb(0x1F7, cmd);
 }
-int disk_read(u32 lba, void *buf, int nsec) {
+static int ata_read(u32 lba, void *buf, int nsec) {
     if (!ata_ok) return 0;
     u16 *p = buf;
     while (nsec > 0) {
@@ -269,7 +577,7 @@ int disk_read(u32 lba, void *buf, int nsec) {
     }
     return 1;
 }
-int disk_write(u32 lba, const void *buf, int nsec) {
+static int ata_write(u32 lba, const void *buf, int nsec) {
     if (!ata_ok) return 0;
     const u16 *p = buf;
     while (nsec > 0) {
@@ -283,6 +591,36 @@ int disk_write(u32 lba, const void *buf, int nsec) {
         lba += n; nsec -= n;
     }
     return 1;
+}
+static void ahci_flush(void) {                            /* FLUSH CACHE via AHCI after writes */
+    if (!ahci_ok || !hp) return;
+    u8 *cfis = ahci_ct.cfis;
+    for (int i = 0; i < 16; i++) cfis[i] = 0;
+    cfis[0] = 0x27; cfis[1] = 0x80; cfis[2] = 0xE7;       /* FLUSH CACHE */
+    ahci_cl.addr0 = (u32)&ahci_ct;
+    ahci_cl.addr1 = 0;
+    ahci_cl.opts = 0x5 | (1u << 16);                        /* write direction irrelevant; 1 empty PRD */
+    ahci_cl.status = 0;
+    ahci_ct.prdt[0].dba = 0; ahci_ct.prdt[0].dbau = 0;
+    ahci_ct.prdt[0].rsv = 0; ahci_ct.prdt[0].dw3 = 0;
+    mmio_wr32(&hp[4], 0);
+    mmio_wr32(&hp[14], 1);
+    for (int t = 0; t < 4000; t++) {
+        if (!(mmio_rd32(&hp[14]) & 1)) return;
+        iosleep(1);
+    }
+}
+int disk_read(u32 lba, void *buf, int nsec) {
+    if (ahci_ok) return ahci_issue(lba, buf, nsec, 0);
+    return ata_read(lba, buf, nsec);
+}
+int disk_write(u32 lba, const void *buf, int nsec) {
+    if (ahci_ok) {
+        int ok = ahci_issue(lba, (void *)buf, nsec, 1);
+        if (ok) ahci_flush();
+        return ok;
+    }
+    return ata_write(lba, buf, nsec);
 }
 
 /* ============================ power ============================ */
@@ -299,9 +637,11 @@ void reboot(void) {
 void arch_init(void) {
     extern u32 g_mbi_mem;
     g_mem_kb = g_mbi_mem;
+    dbg_puts("KTUYOME " KT_VERSION ": boot\n");
+    dbg_init();
     pic_init(); idt_init(); pit_init();
     input_init();
-    ata_init();
-    net_init();
     __asm__ volatile("sti");
+    storage_init();
+    net_init();
 }

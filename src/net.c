@@ -9,8 +9,6 @@
 
 NetInfo net;
 
-static inline void outl(u16 p, u32 v) { __asm__ volatile("outl %0,%1" :: "a"(v), "Nd"(p)); }
-static inline u32 inl(u16 p) { u32 v; __asm__ volatile("inl %1,%0" : "=a"(v) : "Nd"(p)); return v; }
 static inline u16 bs16(u16 x) { return (u16)((x << 8) | (x >> 8)); }
 static inline u32 bs32(u32 x) { return __builtin_bswap32(x); }
 

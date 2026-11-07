@@ -495,7 +495,7 @@ void set_draw(int x, int y, int w, int h) {
         cy += 130; label(cx, cy, "Devices");
         info_row(cx, cy + 44, cw, "Keyboard", "PS/2 keyboard (US layout) - connected");
         info_row(cx, cy + 80, cw, "Pointer", mouse_ok ? (mouse_has_wheel ? "PS/2 mouse with scroll wheel - connected" : "PS/2 mouse - connected") : "No PS/2 mouse detected");
-        info_row(cx, cy + 116, cw, "Storage", disk_present() ? "ATA PIO disk - connected" : "No ATA disk detected");
+        info_row(cx, cy + 116, cw, "Storage", disk_present() ? (disk_is_ahci() ? "SATA AHCI disk - connected" : "ATA PIO disk - connected") : "No disk detected");
     } else if (s_page == 2) {
         int hh, mm, ss, dd, mo, yy; rtc_read(&hh, &mm, &ss, &dd, &mo, &yy);
         char t[40], n[8]; t[0] = 0;

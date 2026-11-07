@@ -35,10 +35,11 @@ Files: Ctrl+F or / search; Ctrl+Space toggle multi-select; Space select; Delete 
 Zip: Enter or Extract extracts an archive; "Zip up" zips the selected file/folder; Ctrl+F or / search.
 
 ## Zip archives and Files search (1.5)
-- **Zip app**: browse folders, select a `.zip` to see its entries and extract all, or select a file/folder and zip it up. Supports scrollable lists and search.
-- **Files multi-select**: Ctrl+Space toggles selection, Space selects, Delete removes all selected, and "Zip sel" creates `selected.zip` from the selection.
-- **Search**: Ctrl+F or `/` filters Files and Zip lists by name.
-- **Home screen**: scrolls horizontally when apps overflow, with arrow buttons, mouse wheel, and saved/restored scroll position.
+- **Zip app**: browse folders, select a `.zip` to see its entries, press Enter to browse inside and extract a single entry, or use Extract to extract all. "Zip up" zips the selected file/folder. Supports scrollable lists and search.
+- **Files multi-select**: Ctrl+Space toggles selection, Space selects, Shift+click range-selects, Ctrl+A selects all, Delete removes all selected, and "Zip sel" creates `selected.zip` from the selection. Search matches are highlighted.
+- **Search**: Ctrl+F or `/` filters Files and Zip lists by name; matches are highlighted.
+- **Home screen**: scrolls horizontally when apps overflow, with arrow buttons, mouse wheel, and saved/restored scroll position/tab.
+- **Settings persistence**: remembers home tab/scroll and last opened Files/Zip folder.
 
 ## PNG and screenshots (1.4)
 **PNG support.** Ktuyome reads PNG files of every colour type (grayscale, RGB, palette, with alpha) and bit depth (1 to 16), including tRNS transparency and interlaced (Adam7) images, up to 8192 x 8192 and 6 million pixels.

@@ -204,6 +204,7 @@ void ui_open_app(int app) {
     if (open_from[2] == 0) { open_from[0] = W / 2 - 80; open_from[1] = H / 2 - 80; open_from[2] = open_from[3] = 160; }
     apps[app].open();
     { char _b[16]; kitoa(_b, home_scroll); fs_write_text("/system/home.txt", _b, (int)strlen(_b)); }
+    { char _b[8]; kitoa(_b, tab); fs_write_text("/system/hometab.txt", _b, (int)strlen(_b)); }
     open_anim.cur = 0; open_anim.tgt = 65536; dirty = 1;
 }
 void ui_close_app(void) {
@@ -539,6 +540,7 @@ void kmain(u32 magic, u32 mbi) {
     settings_load(); settings_apply();
     ui_reload_icons();
     { char _b[32]; if (fs_read_text("/system/home.txt", _b, sizeof _b) >= 0) { home_scroll = katoi(_b); home_scroll_to_sel = 0; } }
+    { char _b[16]; if (fs_read_text("/system/hometab.txt", _b, sizeof _b) >= 0) { tab = katoi(_b); if (tab < 0 || tab > 1) tab = 0; } }
     u32 t0 = ticks();
     for (;;) {                                                      /* splash: fade in, hold, fade out */
         u32 t = ticks() - t0;

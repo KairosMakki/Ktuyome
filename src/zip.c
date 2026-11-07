@@ -8,6 +8,7 @@
 /* ============================== Zip app ============================== */
 static int z_dir, z_ids[FS_MAX + 1], z_n, z_sel, z_scroll;
 static char z_search[64]; static int z_searching;
+static int z_inzip = -1, z_zip_sel = 0;
 
 static int contains_ci(const char *hay, const char *needle) {
     if (!needle || !needle[0]) return 1;
@@ -30,7 +31,7 @@ static void zip_refresh(void) {
     z_sel = iclamp(z_sel, 0, imax(0, z_n - 1));
 }
 
-void zip_open(void) { z_dir = 0; z_sel = 0; z_scroll = 0; zip_refresh(); }
+void zip_open(void) { z_dir = 0; { char b[16]; if (fs_read_text("/system/zipdir.txt", b, sizeof b) >= 0) { int d = katoi(b); if (d >= 0 && d < FS_MAX && fs_nodes[d].used && fs_nodes[d].type == FS_DIR) z_dir = d; } } z_sel = 0; z_scroll = 0; zip_refresh(); }
 void zip_close(void) {}
 
 static void ensure_parents(const char *path) {
@@ -144,6 +145,48 @@ static void zip_zipup_sel(void) {
 }
 
 int zip_key(const Event *e) {
+    if (z_inzip >= 0) {
+        const char *data = fs_data(z_inzip);
+        int size = (int)fs_nodes[z_inzip].size;
+        mz_zip_archive za; mz_zip_zero_struct(&za);
+        int ok = mz_zip_reader_init_mem(&za, data, (size_t)size, 0);
+        mz_uint n = ok ? mz_zip_reader_get_num_files(&za) : 0;
+        if (ok) mz_zip_reader_end(&za);
+        if (e->key == K_ESC || e->key == K_BS || e->key == K_LEFT) { z_inzip = -1; return 1; }
+        if (e->key == K_UP) { if (z_zip_sel > 0) z_zip_sel--; return 1; }
+        if (e->key == K_DOWN) { if (z_zip_sel < (int)n - 1) z_zip_sel++; return 1; }
+        if (e->key == K_ENTER) {
+            /* extract selected entry */
+            mz_zip_archive za2; mz_zip_zero_struct(&za2);
+            if (mz_zip_reader_init_mem(&za2, data, (size_t)size, 0)) {
+                mz_zip_archive_file_stat st;
+                if (z_zip_sel >= 0 && z_zip_sel < (int)n && mz_zip_reader_file_stat(&za2, (mz_uint)z_zip_sel, &st)) {
+                    int isdir = st.m_is_directory;
+                    if (!isdir) {
+                        size_t outsize = 0;
+                        void *buf = mz_zip_reader_extract_to_heap(&za2, (mz_uint)z_zip_sel, &outsize, 0);
+                        /* basename */
+                        char name[64]; mz_zip_reader_get_filename(&za2, (mz_uint)z_zip_sel, name, sizeof name);
+                        int last = -1;
+                        for (int i = 0; name[i]; i++) if (name[i] == '/') last = i;
+                        const char *bn = last >= 0 ? name + last + 1 : name;
+                        if (!bn[0]) bn = "entry";
+                        char target[256]; char dir[128]; fs_path(z_dir, dir, sizeof dir);
+                        if (z_dir != 0) { kstrcpy(target, dir, sizeof target); kstrcat(target, "/", sizeof target); } else { kstrcpy(target, "/", sizeof target); }
+                        kstrcat(target, bn, sizeof target);
+                        int node = fs_create(target, FS_FILE);
+                        if (node >= 0 && buf && outsize > 0) fs_write(node, buf, (int)outsize);
+                        if (buf) kfree(buf);
+                        fs_save();
+                        ui_flash("Extracted entry");
+                    }
+                }
+                mz_zip_reader_end(&za2);
+            }
+            return 1;
+        }
+        return 1;
+    }
     if (z_searching) {
         int len = (int)strlen(z_search);
         if (e->key == K_ESC) { z_searching = 0; z_search[0] = 0; zip_refresh(); return 1; }
@@ -167,12 +210,13 @@ int zip_key(const Event *e) {
         case K_ENTER: {
             if (z_sel < 0 || z_sel >= z_n) return 1;
             int id = z_ids[z_sel];
-            if (id == -2) { z_dir = fs_nodes[z_dir].parent; z_sel = 0; z_scroll = 0; zip_refresh(); return 1; }
-            if (id >= 0 && fs_nodes[id].type == FS_DIR) { z_dir = id; z_sel = 0; z_scroll = 0; zip_refresh(); return 1; }
+            if (id == -2) { z_dir = fs_nodes[z_dir].parent; z_sel = 0; z_scroll = 0; zip_refresh(); { char b[16]; kitoa(b, z_dir); fs_write_text("/system/zipdir.txt", b, (int)strlen(b)); } return 1; }
+            if (id >= 0 && fs_nodes[id].type == FS_DIR) { z_dir = id; z_sel = 0; z_scroll = 0; zip_refresh(); { char b[16]; kitoa(b, z_dir); fs_write_text("/system/zipdir.txt", b, (int)strlen(b)); } return 1; }
+            if (id >= 0 && ends_with(fs_nodes[id].name, ".zip")) { z_inzip = id; z_zip_sel = 0; return 1; }
             zip_extract_sel(); return 1;
         }
         case K_BS: case K_LEFT:
-            if (z_dir) { z_dir = fs_nodes[z_dir].parent; z_sel = 0; z_scroll = 0; zip_refresh(); }
+            if (z_dir) { z_dir = fs_nodes[z_dir].parent; z_sel = 0; z_scroll = 0; zip_refresh(); { char b[16]; kitoa(b, z_dir); fs_write_text("/system/zipdir.txt", b, (int)strlen(b)); } }
             return 1;
     }
     if (e->ch == 'e' || e->ch == 'E') { zip_extract_sel(); return 1; }
@@ -183,6 +227,40 @@ int zip_key(const Event *e) {
 u32 zip_static_bytes(void) { return (u32)(sizeof z_ids); }
 
 void zip_draw(int x, int y, int w, int h) {
+    if (z_inzip >= 0 && fs_nodes[z_inzip].used) {
+        /* browse inside archive */
+        const char *data = fs_data(z_inzip);
+        int size = (int)fs_nodes[z_inzip].size;
+        mz_zip_archive za; mz_zip_zero_struct(&za);
+        int ok = mz_zip_reader_init_mem(&za, data, (size_t)size, 0);
+        mz_uint n = ok ? mz_zip_reader_get_num_files(&za) : 0;
+        if (z_zip_sel < 0) z_zip_sel = 0;
+        if (z_zip_sel >= (int)n && n > 0) z_zip_sel = (int)n - 1;
+        gfx_rrect(x, y, w, 40, 12, WHITE_A(20), WHITE_A(20), 0);
+        char title[160]; kstrcpy(title, "Archive: ", sizeof title); kstrcat(title, fs_nodes[z_inzip].name, sizeof title);
+        gfx_text(F_MD, x + 16, y + 8, title, 0xFFFFFFFF);
+        int bx = x + w - 220;
+        if (ui_btn(bx, y + 2, 200, 36, "Extract all", 1)) zip_extract_sel();
+        int top = y + 54, ah = h - 54, rh = 34, rows = ah / rh;
+        ui_panel(x, top, w, ah, WHITE_A(12));
+        if (g_wheel) { /* no scroll variable; navigate selection */ }
+        for (int i = 0; i < (int)n && i < rows; i++) {
+            int idx = i; /* simple no scroll for now */
+            int ry = top + 4 + i * rh;
+            mz_zip_archive_file_stat st;
+            if (!mz_zip_reader_file_stat(&za, idx, &st)) continue;
+            int on = (idx == z_zip_sel);
+            if (on) gfx_rrect(x + 6, ry, w - 12, rh - 4, 10, col_alpha(ACC, 120), col_alpha(ACC, 120), 0);
+            char name[64]; mz_zip_reader_get_filename(&za, idx, name, sizeof name);
+            gfx_text(F_MD, x + 20, ry + 4, name, 0xFFFFFFFF);
+            char sz[24]; kitoa(sz, (int)st.m_uncomp_size); kstrcat(sz, " B", sizeof sz);
+            gfx_text_r(F_SM, x + w - 22, ry + 6, sz, WHITE_A(150));
+            if (ui_click_in(x + 6, ry, w - 12, rh - 4)) z_zip_sel = idx;
+        }
+        gfx_text(F_SM, x + 4, y + h - 24, "Enter extracts selected   Backspace exits", WHITE_A(110));
+        if (ok) mz_zip_reader_end(&za);
+        return;
+    }
     char path[128]; fs_path(z_dir, path, sizeof path);
     char title[200]; kstrcpy(title, path, sizeof title);
     if (z_search[0] || z_searching) { kstrcat(title, "   search: ", sizeof title); kstrcat(title, z_search, sizeof title); if (z_searching) kstrcat(title, "_", sizeof title); }

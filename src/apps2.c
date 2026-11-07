@@ -38,14 +38,14 @@ static void files_refresh(void) {
 }
 u32 files_static_bytes(void) { return (u32)(sizeof f_bmp + sizeof f_ids + sizeof f_pr); }
 static void view_close(void) { png_free(&f_view); f_view_id = -1; }
-void files_open(void) { view_close(); files_refresh(); }
+void files_open(void) { view_close(); { char b[16]; if (fs_read_text("/system/filesdir.txt", b, sizeof b) >= 0) { int d = katoi(b); if (d >= 0 && d < FS_MAX && fs_nodes[d].used && fs_nodes[d].type == FS_DIR) f_dir = d; } } files_refresh(); }
 void files_close(void) { view_close(); }
 void files_invalidate(void) { files_refresh(); }
 static void files_activate(int i) {
     if (i < 0 || i >= f_n) return;
     int id = f_ids[i];
     if (id == -2) { f_dir = fs_nodes[f_dir].parent; f_sel = 0; files_refresh(); return; }
-    if (fs_nodes[id].type == FS_DIR) { f_dir = id; f_sel = 0; f_scroll = 0; files_refresh(); return; }
+    if (fs_nodes[id].type == FS_DIR) { f_dir = id; f_sel = 0; f_scroll = 0; files_refresh(); { char b[16]; kitoa(b, f_dir); fs_write_text("/system/filesdir.txt", b, (int)strlen(b)); } return; }
     char p[96]; fs_path(id, p, sizeof p);
     if (png_is(fs_nodes[id].name)) {                                    /* images open in the viewer */
         view_close();
@@ -55,7 +55,7 @@ static void files_activate(int i) {
     }
     editor_open_path(p); ui_switch_app(APP_EDITOR);
 }
-static void files_up(void) { if (f_dir) { f_dir = fs_nodes[f_dir].parent; f_sel = 0; f_scroll = 0; files_refresh(); } }
+static void files_up(void) { if (f_dir) { f_dir = fs_nodes[f_dir].parent; f_sel = 0; f_scroll = 0; files_refresh(); { char b[16]; kitoa(b, f_dir); fs_write_text("/system/filesdir.txt", b, (int)strlen(b)); } } }
 static void files_delete_sel(void) {
     int any = 0;
     for (int i = 0; i < FS_MAX; i++) if (f_selected[i]) { any = 1; break; }
@@ -221,6 +221,10 @@ int files_key(const Event *e) {
     }
     if ((e->mods & MOD_CTRL) && (e->key == 'f' || e->key == 'F')) { f_searching = 1; f_search[0] = 0; files_refresh(); return 1; }
     if (e->ch == '/') { f_searching = 1; f_search[0] = 0; files_refresh(); return 1; }
+    if ((e->mods & MOD_CTRL) && (e->key == 'a' || e->key == 'A')) {
+        for (int i = 0; i < f_n; i++) if (f_ids[i] >= 0) f_selected[f_ids[i]] = 1;
+        return 1;
+    }
     int ck = clip_key(e);
     if (ck == CK_COPY) { files_clip(0); return 1; }
     if (ck == CK_CUT) { files_clip(1); return 1; }
@@ -294,14 +298,51 @@ void files_draw(int x, int y, int w, int h) {
         u32 c1 = isdir ? 0xFFFFC857 : (ends_with(nm, ".svg") ? 0xFF7AD7F0 : (png_is(nm) ? 0xFF9CE29B : 0xFFC9D1E3));
         gfx_rrect(x + 20, ry + 9, 26, 20, 5, c1, col_lerp(c1, 0xFF000000, 40), 0);
         if (isdir) gfx_rrect(x + 20, ry + 6, 12, 6, 2, c1, c1, 0);
-        gfx_text(F_MD, x + 58, ry + 6, nm, 0xFFFFFFFF);
+        if (f_search[0]) {
+            int pos = -1;
+            for (int a = 0; nm[a]; a++) {
+                int b = 0, ok = 1;
+                while (f_search[b] && nm[a + b]) {
+                    char c1 = nm[a+b], c2 = f_search[b];
+                    if (c1 >= 'A' && c1 <= 'Z') c1 += 32;
+                    if (c2 >= 'A' && c2 <= 'Z') c2 += 32;
+                    if (c1 != c2) { ok = 0; break; }
+                    b++;
+                }
+                if (ok && f_search[b] == 0) { pos = a; break; }
+            }
+            if (pos >= 0) {
+                char left[32], mid[32], right[32];
+                int l = pos; if (l > 31) l = 31;
+                memcpy(left, nm, l); left[l] = 0;
+                int ml = (int)strlen(f_search); if (ml > 31) ml = 31;
+                memcpy(mid, nm + pos, ml); mid[ml] = 0;
+                kstrcpy(right, nm + pos + ml, sizeof right);
+                int xx = x + 58;
+                gfx_text(F_MD, xx, ry + 6, left, 0xFFFFFFFF); xx += gfx_text_w(F_MD, left, -1);
+                gfx_text(F_MD, xx, ry + 6, mid, 0xFF9CE29B); xx += gfx_text_w(F_MD, mid, -1);
+                gfx_text(F_MD, xx, ry + 6, right, 0xFFFFFFFF);
+            } else {
+                gfx_text(F_MD, x + 58, ry + 6, nm, 0xFFFFFFFF);
+            }
+        } else {
+            gfx_text(F_MD, x + 58, ry + 6, nm, 0xFFFFFFFF);
+        }
         if (id >= 0 && f_selected[id]) gfx_text(F_MD, x + lw - 60, ry + 6, "[x]", 0xFF9CE29B);
         if (!isdir) {
             char sz[24]; int s = (int)fs_nodes[id].size;
             if (s >= 1024) { kitoa(sz, s / 1024); kstrcat(sz, " KB", sizeof sz); } else { kitoa(sz, s); kstrcat(sz, " B", sizeof sz); }
             gfx_text_r(F_SM, x + lw - 22, ry + 9, sz, WHITE_A(150));
         }
-        if (ui_click_in(x + 6, ry, lw - 12, rh - 4)) { if (f_sel == i) files_activate(i); else f_sel = i; }
+        if (ui_click_in(x + 6, ry, lw - 12, rh - 4)) {
+            if (g_click_mods & MOD_CTRL) { if (id >= 0) f_selected[id] = !f_selected[id]; f_sel = i; }
+            else if (g_click_mods & MOD_SHIFT) {
+                /* range select between current anchor and i */
+                int a = f_sel, b = i; if (a > b) { int t = a; a = b; b = t; }
+                for (int k = a; k <= b; k++) if (k >= 0 && k < f_n && f_ids[k] >= 0) f_selected[f_ids[k]] = 1;
+                f_sel = i;
+            } else { if (f_sel == i) files_activate(i); else f_sel = i; }
+        }
     }
     gfx_noclip();
     /* preview pane */

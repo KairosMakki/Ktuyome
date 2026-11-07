@@ -248,7 +248,8 @@ void gfx_present(void) {
             g_bb[i] = (((c & 0xFF00FF) * k >> 8) & 0xFF00FF) | (((c & 0x00FF00) * k >> 8) & 0x00FF00);
         }
     }
-    for (int y = 0; y < H; y++) memcpy((u8 *)fb + y * fb_pitch, g_bb + y * W, W * 4);
+    if (fb_pitch == W * 4) memcpy((u8 *)fb, g_bb, (u32)W * H * 4);
+    else for (int y = 0; y < H; y++) memcpy((u8 *)fb + y * fb_pitch, g_bb + y * W, W * 4);
 }
 
 /* ---------------- wallpapers ---------------- */
